@@ -75,22 +75,32 @@ flowchart TB
     subgraph A["chap01-03 — 1 service"]
         direction TB
         A1["mlflow<br/>(server + script local)"]
+        A_db[("SQLite<br/>./database/mlflow.db")]
+        A_art[("artifacts<br/>./mlruns/")]
+        A1 --- A_db
+        A1 --- A_art
     end
 
     subgraph B["chap04-12 — 2 services"]
         direction TB
         B1[mlflow]
         B2[trainer]
+        B_db[("SQLite<br/>./database/mlflow.db")]
+        B_art[("artifacts<br/>./mlruns/")]
         B1 -- recap-net --> B2
+        B1 --- B_db
+        B1 --- B_art
     end
 
     subgraph C["chap13 — 3 services (production)"]
         direction TB
         C1[mlflow]
         C2[trainer]
-        C3[(postgres<br/>backend store)]
+        C3[("PostgreSQL<br/>backend store<br/>postgres-data vol")]
+        C_art[("artifacts<br/>./mlruns/ or s3://")]
         C1 -- recap-net --> C2
         C1 -- recap-net --> C3
+        C1 --- C_art
     end
 
     subgraph D["chap24 — pretrainer + registrar"]
@@ -98,15 +108,25 @@ flowchart TB
         D1[mlflow]
         D2[pretrainer]
         D3[registrar]
+        D_db[("SQLite<br/>./database/mlflow.db")]
+        D_art[("artifacts<br/>./mlruns/")]
+        D_shared[("shared volume<br/>external_model.pkl")]
         D1 -- recap-net --> D3
-        D2 -. shared volume .-> D3
+        D2 -. writes pickle .-> D_shared
+        D_shared -. read pickle .-> D3
+        D1 --- D_db
+        D1 --- D_art
     end
 
     subgraph E["chap26 — projets MLflow (sans trainer Docker)"]
         direction TB
         E1[mlflow server]
         E2["host Python<br/>(MLproject + conda)"]
+        E_db[("SQLite<br/>./database/mlflow.db")]
+        E_art[("artifacts<br/>./mlruns/")]
         E1 -.->|CLI mlflow run| E2
+        E1 --- E_db
+        E1 --- E_art
     end
 
     subgraph F["chap26b — + service cli"]
@@ -114,8 +134,12 @@ flowchart TB
         F1[mlflow]
         F2[trainer]
         F3["cli<br/>(mlflow doctor/artifacts/...)"]
+        F_db[("SQLite<br/>./database/mlflow.db")]
+        F_art[("artifacts<br/>./mlruns/")]
         F1 -- recap-net --> F2
         F1 -- recap-net --> F3
+        F1 --- F_db
+        F1 --- F_art
     end
 
     A --> B
