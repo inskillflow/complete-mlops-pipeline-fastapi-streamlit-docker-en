@@ -25,7 +25,9 @@
     ports:
       - "5000:5000"
     volumes:
-      - mlflow-artifacts:/mlflow/mlruns
+      - ./mlruns:/mlflow/mlruns         # bind mount -> host folder MUST exist (NO ./database here, Postgres replaces SQLite)
+      - .:/work                         # whole project visible from Docker Desktop -> Exec -> ls
+    working_dir: /work
     networks:
       - recap-net
     restart: unless-stopped
@@ -56,7 +58,6 @@
 
 volumes:
   postgres-data:
-  mlflow-artifacts:
 
 networks:
   recap-net:

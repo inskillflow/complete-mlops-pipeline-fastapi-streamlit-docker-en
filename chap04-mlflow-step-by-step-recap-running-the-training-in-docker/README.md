@@ -14,6 +14,55 @@ The full lesson lives at [`../04-practical-work-mlflow-step-by-step-recap-runnin
 >
 > À la fin, tu comprends le pattern multi-services `mlflow + trainer`, la différence entre `exec` (attacher) et `run --rm` (one-shot), et tu vois _pourquoi_ MLflow a besoin qu'on lui dise explicitement où écrire — ce que chap05 va corriger avec une variable d'environnement.
 
+## Before you start — Create the host folders!
+
+> [!IMPORTANT]
+> **You MUST create the local folders `database/` and `mlruns/` BEFORE the first `docker compose up`.**
+>
+> This chapter's `docker-compose.yml` uses **bind mounts** (host folders mapped INTO the container), not anonymous Docker volumes. If the host folders don't exist, Docker will silently create them as **empty root-owned directories** that are hard to inspect or clean up from your editor on Windows.
+>
+> ### Create them now
+> ```bash
+> mkdir database mlruns       # bash / Git Bash / macOS / Linux / WSL
+> ```
+> ```powershell
+> New-Item -ItemType Directory database, mlruns -Force | Out-Null   # PowerShell
+> ```
+>
+> ### What ends up in those folders — and what `working_dir` is for
+>
+> | Host (your laptop, this chapter folder) | Container path (`mlflow` service)   | What lives there                                |
+> | --------------------------------------- | ----------------------------------- | ----------------------------------------------- |
+> | `./database/`                           | `/mlflow/database/`                 | `mlflow.db` — the SQLite tracking store         |
+> | `./mlruns/`                             | `/mlflow/mlruns/`                   | Artifacts: models, plots, metric files          |
+> | `.` (the entire chapter folder)         | `/work/`  ←  this is `working_dir:` | The full project tree: `trainer/`, `data/`, ... |
+>
+> The third mount (`.:/work`) plus `working_dir: /work` is what makes **Docker Desktop → Containers → `mlflow-recap-04` → Exec → `ls`** show all your project files. Without it, `exec` would drop you in `/mlflow/` and you'd see nothing useful. `working_dir:` is a Docker Compose directive that sets the default cwd for `RUN`, `CMD` and any `docker compose exec` — think of it as `cd /work` baked into the container.
+
+## Two ways to launch the training (chap04 = bug-by-design!)
+
+> [!WARNING]
+> **Reminder: this chapter intentionally has a bug.** `train.py` does NOT call `mlflow.set_tracking_uri(...)`, so runs are written to `file:///code/mlruns` INSIDE the `trainer` container, then wiped by `--rm`. You will NOT see them in the UI. **chap05 fixes this** with the `MLFLOW_TRACKING_URI` env var.
+
+> [!NOTE]
+> **Way A — canonical (one-shot `trainer` container, shows the bug — this is the lesson!):**
+> ```bash
+> docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
+> # runs vanish: trainer wrote them to file:///code/mlruns then --rm deleted the container
+> ```
+>
+> **Way B — via `docker compose exec` inside the running `mlflow` container (same bug, different container — runs go to /work/mlruns and the UI still does NOT pick them up because the URI was never set):**
+> ```bash
+> docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> **Way B-fixed — same as Way B but with `MLFLOW_TRACKING_URI` overridden on the fly (run NOW appears in the UI):**
+> ```bash
+> docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> Way B works because `mlflow==2.16.2` installed in the `mlflow` image brings `scikit-learn`, `pandas` and `numpy` as transitive deps. The whole point of chap04 is to **see** Way A fail silently, understand WHY, and then move on to chap05 where the env var fixes it cleanly. Use Way B-fixed only if you want to peek at what the "fixed" behavior looks like before reading chap05.
+
 
 This lab shows how to move the training script **out of the MLflow container** and into its own dedicated `trainer` service. From now on every chapter uses the same two-service skeleton: `mlflow` (the tracking server) + `trainer` (the one-shot Python image that runs `train.py`).
 

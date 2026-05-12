@@ -4,6 +4,47 @@ The full lesson lives at [../07-practical-work-mlflow-step-by-step-recap-active-
 
 > **In one line.** This chapter is about how to **instrument the script with `mlflow.active_run()` (live introspection) and `mlflow.last_active_run()` (post-mortem), and contrast the imperative `start_run() / end_run()` pair with the context manager seen earlier**.
 
+
+## Before you start — Create the host folders!
+
+> [!IMPORTANT]
+> **You MUST create the local folders `database/` and `mlruns/` BEFORE the first `docker compose up`.**
+>
+> This chapter's `docker-compose.yml` uses **bind mounts** (host folders mapped INTO the container), not anonymous Docker volumes. If the host folders don't exist, Docker will silently create them as **empty root-owned directories** that are hard to inspect or clean up from your editor on Windows, and you'll wonder why `mlflow.db` "disappears" when you run `docker compose down -v`.
+>
+> ### Create them now
+> ```bash
+> mkdir database mlruns       # bash / Git Bash / macOS / Linux / WSL
+> ```
+> ```powershell
+> New-Item -ItemType Directory database, mlruns -Force | Out-Null   # PowerShell
+> ```
+>
+> ### What ends up in those folders — and what `working_dir` is for
+>
+> | Host (your laptop, this chapter folder) | Container path (`mlflow` service)   | What lives there                                |
+> | --------------------------------------- | ----------------------------------- | ----------------------------------------------- |
+> | `./database/`                           | `/mlflow/database/`                 | `mlflow.db` — the SQLite tracking store         |
+> | `./mlruns/`                             | `/mlflow/mlruns/`                   | Artifacts: models, plots, metric files          |
+> | `.` (the entire chapter folder)         | `/work/`  ←  this is `working_dir:` | The full project tree: `trainer/`, `data/`, ... |
+>
+> The third mount (`.:/work`) plus `working_dir: /work` is what makes **Docker Desktop → Containers → `mlflow-recap-XX` → Exec → `ls`** show all your project files. Without it, `exec` would drop you in `/mlflow/` and you'd see nothing useful. `working_dir:` is a Docker Compose directive that sets the default cwd for `RUN`, `CMD` and any `docker compose exec` — think of it as `cd /work` baked into the container.
+
+## Two ways to launch the training
+
+> [!NOTE]
+> **Way A — canonical (one-shot `trainer` container, recommended for the lesson):**
+> ```bash
+> docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> **Way B — via `docker compose exec` inside the running `mlflow` container (Docker Desktop friendly):**
+> ```bash
+> docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> Both run the same `train.py`. Way B works because `mlflow==2.16.2` brings `scikit-learn`, `pandas` and `numpy` as transitive deps. From chap05 onwards, the `MLFLOW_TRACKING_URI` env var is set on the `trainer` service in `docker-compose.yml` and `train.py` reads it via `os.getenv(...)`, so both Way A and Way B "just work" and the runs appear in the MLflow UI under the correct experiment. If a run does NOT appear in the UI, force the URI with: `docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py ...`
+
 ## What is new vs chap06
 
 - `run = mlflow.start_run(run_name=...)` -> imperative style, must be paired with `mlflow.end_run()`

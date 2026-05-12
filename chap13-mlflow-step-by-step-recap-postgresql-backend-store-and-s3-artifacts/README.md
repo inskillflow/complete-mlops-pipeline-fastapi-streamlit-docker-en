@@ -4,6 +4,47 @@ The full lesson lives at [../13-practical-work-mlflow-step-by-step-recap-postgre
 
 > **In one line.** This chapter is about how to **replace SQLite with PostgreSQL for the backend store, and outline how to plug an S3 (or MinIO) bucket as the artifact store -- the canonical production deployment of MLflow**.
 
+
+## Before you start — Create the host folder!
+
+> [!IMPORTANT]
+> **You MUST create the local folder `mlruns/` BEFORE the first `docker compose up`.**
+>
+> This chapter uses **Postgres** as the backend store, so there is NO `./database/` bind mount (Postgres data lives in a named Docker volume `postgres-data`). But `./mlruns/` and `.` are still bind-mounted into the `mlflow` container.
+>
+> ### Create it now
+> ```bash
+> mkdir mlruns       # bash / Git Bash / macOS / Linux / WSL
+> ```
+> ```powershell
+> New-Item -ItemType Directory mlruns -Force | Out-Null   # PowerShell
+> ```
+>
+> ### What ends up in those folders — and what `working_dir` is for
+>
+> | Host (your laptop, this chapter folder) | Container path (`mlflow` service)   | What lives there                                |
+> | --------------------------------------- | ----------------------------------- | ----------------------------------------------- |
+> | (none — Postgres replaces SQLite)       | `postgres-data` (named volume)      | Postgres metadata: experiments, runs, metrics   |
+> | `./mlruns/`                             | `/mlflow/mlruns/`                   | Artifacts: models, plots, metric files          |
+> | `.` (the entire chapter folder)         | `/work/`  ←  this is `working_dir:` | The full project tree: `trainer/`, `data/`, ... |
+>
+> The `.:/work` mount plus `working_dir: /work` is what makes **Docker Desktop → Containers → `mlflow-recap-13` → Exec → `ls`** show all your project files. `working_dir:` is a Compose directive that sets the default cwd for `RUN`, `CMD` and any `docker compose exec`.
+
+## Two ways to launch the training
+
+> [!NOTE]
+> **Way A — canonical (one-shot `trainer` container, recommended for the lesson):**
+> ```bash
+> docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> **Way B — via `docker compose exec` inside the running `mlflow` container (Docker Desktop friendly):**
+> ```bash
+> docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> Both run the same `train.py` and write to Postgres (NOT to a local SQLite file). `MLFLOW_TRACKING_URI` is set on the `trainer` service in `docker-compose.yml`, so both Way A and Way B "just work" and the runs appear in the MLflow UI. If a run does NOT appear, force the URI with: `docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py ...`
+
 ## What is new vs chap12
 
 - Third service: `postgres` (image `postgres:16-alpine`) with `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` env vars

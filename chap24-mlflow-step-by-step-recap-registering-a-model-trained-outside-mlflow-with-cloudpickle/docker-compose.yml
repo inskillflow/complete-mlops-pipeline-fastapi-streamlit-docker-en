@@ -7,8 +7,10 @@
     ports:
       - "5000:5000"
     volumes:
-      - mlflow-db:/mlflow/database
-      - mlflow-artifacts:/mlflow/mlruns
+      - ./database:/mlflow/database     # bind mount -> host folder MUST exist
+      - ./mlruns:/mlflow/mlruns         # bind mount -> host folder MUST exist
+      - .:/work                         # whole project visible from Docker Desktop -> Exec -> ls
+    working_dir: /work
     networks:
       - recap-net
     restart: unless-stopped
@@ -43,8 +45,6 @@
         condition: service_healthy
 
 volumes:
-  mlflow-db:
-  mlflow-artifacts:
   shared:
 
 networks:

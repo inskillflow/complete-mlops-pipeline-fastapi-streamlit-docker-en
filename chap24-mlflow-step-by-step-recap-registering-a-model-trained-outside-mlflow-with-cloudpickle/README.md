@@ -4,6 +4,49 @@ The full lesson lives at [../24-practical-work-mlflow-step-by-step-recap-registe
 
 > **In one line.** This chapter is about how to **split the workflow into two one-shot Docker services: a `pretrainer` that trains a model WITHOUT touching MLflow (`pickle.dump` + done) and a `registrar` that **imports** that pickle, loads it, and pushes it into the registry with `mlflow.sklearn.log_model(..., serialization_format="cloudpickle", registered_model_name=...)`**.
 
+## Before you start — Create the host folders!
+
+> [!IMPORTANT]
+> **You MUST create the local folders `database/` and `mlruns/` BEFORE the first `docker compose up`.**
+>
+> This chapter's `docker-compose.yml` uses **bind mounts** (host folders mapped INTO the `mlflow` container) for the tracking DB and artifacts, plus a separate **named volume `shared:`** that the `pretrainer` and `registrar` services share for the pickle handover. If the host folders don't exist, Docker will silently create them as **empty root-owned directories**.
+>
+> ### Create them now
+> ```bash
+> mkdir database mlruns       # bash / Git Bash / macOS / Linux / WSL
+> ```
+> ```powershell
+> New-Item -ItemType Directory database, mlruns -Force | Out-Null   # PowerShell
+> ```
+>
+> ### What ends up in those folders — and what `working_dir` is for
+>
+> | Host (your laptop, this chapter folder) | Container path                                | What lives there                                          |
+> | --------------------------------------- | --------------------------------------------- | --------------------------------------------------------- |
+> | `./database/`                           | `/mlflow/database/` (in `mlflow`)             | `mlflow.db` — the SQLite tracking store                   |
+> | `./mlruns/`                             | `/mlflow/mlruns/`  (in `mlflow`)              | Artifacts + the registered `external-elasticnet` model    |
+> | `.` (the entire chapter folder)         | `/work/`  ←  this is `working_dir:` in mlflow | The full project tree: `pretrainer/`, `registrar/`, ...   |
+> | (named volume `shared:`)                | `/shared/` (in `pretrainer` and `registrar`)  | `external_model.pkl` produced by `pretrainer`             |
+>
+> The `.:/work` mount plus `working_dir: /work` is what makes **Docker Desktop → Containers → `mlflow-recap-24` → Exec → `ls`** show all your project files (so you can run `python registrar/register_external.py` from there). `working_dir:` is a Compose directive that sets the default cwd for `RUN`, `CMD` and any `docker compose exec`.
+
+## Two ways to launch the workflow
+
+> [!NOTE]
+> **Way A — canonical (run the two one-shot containers in order, recommended for the lesson):**
+> ```bash
+> docker compose run --rm pretrainer        # writes /shared/external_model.pkl (no MLflow)
+> docker compose run --rm registrar         # loads pickle, registers it in MLflow
+> ```
+>
+> **Way B — via `docker compose exec` inside the running `mlflow` container (Docker Desktop friendly):**
+> ```bash
+> docker compose run --rm pretrainer        # still needed: produces /shared/external_model.pkl
+> docker compose exec mlflow python registrar/register_external.py
+> ```
+>
+> The `pretrainer` MUST be a one-shot container — it has no MLflow client and writes the pickle to the `shared` named volume; you cannot run it from the `mlflow` container because the `mlflow` container has no access to `shared/`. The `registrar` script CAN run either as its own container OR directly inside `mlflow` (the `mlflow` image has `mlflow.sklearn.log_model`, and since `.:/work` is mounted, the script file is visible — BUT the `mlflow` container has no `/shared/` mount, so Way B reads the pickle from `./shared` only if you tweak the mount. In practice, prefer Way A.). Both paths produce the same registered model `external-elasticnet` in the MLflow Registry. If a run does NOT appear in the UI, force the URI with: `docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python registrar/register_external.py`.
+
 ## What is new vs chap23
 
 - Two trainer services: `pretrainer/` (pure sklearn, no MLflow) and `registrar/` (MLflow-aware import job)
