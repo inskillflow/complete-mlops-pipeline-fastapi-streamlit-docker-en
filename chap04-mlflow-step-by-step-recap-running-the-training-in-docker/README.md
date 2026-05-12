@@ -24,7 +24,7 @@ This lab shows how to move the training script **out of the MLflow container** a
 - `docker-compose.yml` gains a second service `trainer` on a shared `recap-net` network
 - `ENTRYPOINT ["python", "train.py"]` in the trainer image -> CLI args flow through `docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1`
 - `./data:/code/data` bind mount so you can edit the CSV without rebuilding
-- The MLflow data now lives in **named Docker volumes** (`mlflow-db`, `mlflow-artifacts`) instead of host folders `database/` and `mlruns/` -> no more `mkdir` before starting
+- Same host bind mounts as chap01-03 (`./database`, `./mlruns`, `.:/work`) so you can still `docker compose exec mlflow ls` from Docker Desktop and see the whole project
 
 > ⚠️ **Chapter quirk.** `train.py` deliberately does NOT call `mlflow.set_tracking_uri(...)`. The runs end up in `file:///code/mlruns` **inside the trainer container** and are wiped by `--rm`. This is the "bug-by-design" that **chap05** fixes via the `MLFLOW_TRACKING_URI` environment variable.
 
@@ -94,7 +94,20 @@ You should now be inside this folder:
 chap04-mlflow-step-by-step-recap-running-the-training-in-docker
 ```
 
-This chapter uses **named Docker volumes** (`mlflow-db`, `mlflow-artifacts`) instead of bind mounts to host folders, so you **do NOT need to `mkdir database mlruns`** like in chap01-03. The volumes are created automatically by Docker.
+This chapter uses **bind mounts** to host folders (same pattern as chap01-03), so the MLflow server can read/write to your local `./database/` and `./mlruns/` -> you can see everything from your file explorer AND from Docker Desktop -> Exec -> `ls`.
+
+If the two folders do not exist yet, create them first:
+
+```bash
+mkdir database mlruns       # bash / Git Bash / WSL
+```
+
+```powershell
+New-Item -ItemType Directory database, mlruns -Force | Out-Null   # PowerShell
+```
+
+> [!IMPORTANT]
+> Without these two folders on the host **before** `docker compose up`, Docker creates them as **root-owned** empty folders inside the container and writes the SQLite DB there -> permission errors on Linux/WSL. On Windows Docker Desktop it usually works but creates `database` and `mlruns` automatically with possibly weird permissions.
 
 Start the MLflow server in the background:
 
@@ -132,13 +145,13 @@ alpha    = 0.1
 l1_ratio = 0.1
 ```
 
-Command:
+You can launch the training **two equivalent ways**:
+
+### Way A -- canonical chap04 (one-shot `trainer` container)
 
 ```bash
 docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
 ```
-
-Three things happen here:
 
 | Token | Meaning |
 |---|---|
@@ -147,13 +160,30 @@ Three things happen here:
 | `trainer` | Which service to run. |
 | `--alpha 0.1 --l1_ratio 0.1` | These tokens are appended to the `ENTRYPOINT`, so the container actually runs `python train.py --alpha 0.1 --l1_ratio 0.1`. |
 
+### Way B -- via `docker compose exec` inside the running `mlflow` container
+
+```bash
+docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+```
+
+Same script, but launched **inside the mlflow server container** (which has `scikit-learn`, `pandas`, `numpy` installed as transitive deps of `mlflow==2.16.2`).
+
 Then check:
 
 ```text
 http://localhost:5000
 ```
 
-> ⚠️ **Surprise:** the UI is still empty. See [section 7 of the lesson](../04-practical-work-mlflow-step-by-step-recap-running-the-training-in-a-second-docker-service-with-requirements-txt.md#section-7) -- the missing `set_tracking_uri` means the run was written inside the trainer container and wiped by `--rm`. **chap05 fixes it.**
+> ⚠️ **Surprise:** the UI is still empty whichever way you launched it. The script does NOT call `set_tracking_uri(...)` and no `MLFLOW_TRACKING_URI` env var is set, so MLflow falls back to `file:///...mlruns` inside whichever container ran it. **chap05 fixes this for Way A; the `-e MLFLOW_TRACKING_URI=...` flag below fixes it for Way B.**
+
+### Way B-fixed -- with the env var override
+
+```bash
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow \
+  python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+```
+
+This time the run appears in the UI under `experiment_1`.
 
 ---
 
@@ -166,13 +196,17 @@ alpha    = 0.5
 l1_ratio = 0.5
 ```
 
-Command:
-
 ```bash
+# Way A (chap04 canonical, bug-by-design):
 docker compose run --rm trainer --alpha 0.5 --l1_ratio 0.5
-```
 
-Same outcome as experiment 1: the run is created **inside** the trainer container, never reaches the MLflow UI.
+# Way B (run via exec, bug too):
+docker compose exec mlflow python trainer/train.py --alpha 0.5 --l1_ratio 0.5
+
+# Way B-fixed (run in UI):
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow \
+  python trainer/train.py --alpha 0.5 --l1_ratio 0.5
+```
 
 ---
 
@@ -185,10 +219,13 @@ alpha    = 0.9
 l1_ratio = 0.1
 ```
 
-Command:
-
 ```bash
+# Way A:
 docker compose run --rm trainer --alpha 0.9 --l1_ratio 0.1
+
+# Way B-fixed:
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow \
+  python trainer/train.py --alpha 0.9 --l1_ratio 0.1
 ```
 
 ---
@@ -219,25 +256,25 @@ docker compose down -v    # wipe everything (DB + artifacts + named volumes)
 
 ## What ends up on your host
 
-This chapter does **NOT** populate host folders (no bind mounts for MLflow data). Instead, two named Docker volumes are created:
+This chapter populates **host folders** (bind mounts, same as chap01-03):
 
 ```text
-Docker named volumes:
-  mlflow-db          <- SQLite metadata DB (experiments, runs, registered models)
-  mlflow-artifacts   <- pickled models, signatures, plots, CSVs
+chap04-mlflow-step-by-step-recap-running-the-training-in-docker/
+├── database/
+│   └── mlflow.db          <- SQLite metadata DB (created when the server starts)
+├── mlruns/                <- empty until a run actually reaches the server
+│   └── (no runs yet -- this is the chap04 bug-by-design, see section "Where did my runs go?")
+├── data/
+│   └── red-wine-quality.csv
+├── mlflow/                <- Dockerfile for the MLflow server image
+├── trainer/               <- Dockerfile + requirements.txt + train.py for the trainer image
+├── docker-compose.yml
+└── README.md
 ```
 
-Inspect them with:
+Inspect from your host with `ls -la database/ mlruns/` (bash) or `dir database, mlruns` (PowerShell).
 
-```bash
-docker volume ls | grep recap
-docker volume inspect mlflow-db
-docker volume inspect mlflow-artifacts
-```
-
-These volumes survive `docker compose down`. Only `docker compose down -v` wipes them.
-
-The only host-side bind mount is `./data:/code/data` (the wine-quality CSV) -- already on disk, you do not need to create it.
+Wipe with `rm -rf database/* mlruns/*` (bash) — `database/.gitkeep` and `mlruns/.gitkeep` keep the folders in git.
 
 ---
 
@@ -263,11 +300,14 @@ Three ways to fix this -- the lesson explains all three, and **chap05 implements
 
 # Final command recap
 
+### Way A -- chap04 canonical (one-shot `trainer`, demonstrates the bug)
+
 ```bash
 git clone https://github.com/inskillflow/mlops-beginner-level-01-en.git
 
 cd mlops-beginner-level-01-en/chap04-mlflow-step-by-step-recap-running-the-training-in-docker
 
+mkdir database mlruns                               # bash / Git Bash / WSL
 docker compose up -d --build mlflow
 
 docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
@@ -284,11 +324,50 @@ git clone https://github.com/inskillflow/mlops-beginner-level-01-en.git
 
 cd mlops-beginner-level-01-en/chap04-mlflow-step-by-step-recap-running-the-training-in-docker
 
+New-Item -ItemType Directory database, mlruns -Force | Out-Null
 docker compose up -d --build mlflow
 
 docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
 docker compose run --rm trainer --alpha 0.5 --l1_ratio 0.5
 docker compose run --rm trainer --alpha 0.9 --l1_ratio 0.1
+
+docker compose down
+```
+
+### Way B -- via `docker compose exec` inside the mlflow container (Docker Desktop friendly)
+
+```bash
+git clone https://github.com/inskillflow/mlops-beginner-level-01-en.git
+
+cd mlops-beginner-level-01-en/chap04-mlflow-step-by-step-recap-running-the-training-in-docker
+
+mkdir database mlruns
+docker compose up -d --build mlflow
+
+# Without the env var override -> bug (run vanishes from UI):
+docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+
+# With the env var override -> run appears in UI:
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py --alpha 0.5 --l1_ratio 0.5
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py --alpha 0.9 --l1_ratio 0.1
+
+docker compose down
+```
+
+PowerShell version (one line each):
+
+```powershell
+git clone https://github.com/inskillflow/mlops-beginner-level-01-en.git
+
+cd mlops-beginner-level-01-en/chap04-mlflow-step-by-step-recap-running-the-training-in-docker
+
+New-Item -ItemType Directory database, mlruns -Force | Out-Null
+docker compose up -d --build mlflow
+
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py --alpha 0.5 --l1_ratio 0.5
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py --alpha 0.9 --l1_ratio 0.1
 
 docker compose down
 ```
@@ -324,6 +403,82 @@ exit
 ```
 
 `exec` (not `run`) is the right tool here because the MLflow server is already running -- you attach to it instead of spawning a new container.
+
+---
+
+# From Docker Desktop -> Exec, what can I see and what can I run? ⚠️
+
+Open Docker Desktop -> Containers -> `mlflow-recap-04` -> Exec tab. Type:
+
+```bash
+ls          # -> database  mlruns  trainer  mlflow  data  docker-compose.yml  README.md ...
+pwd         # -> /work     (because of working_dir: /work in docker-compose.yml)
+```
+
+You can:
+
+- Browse the whole project (everything under `/work` is the host folder of this chapter)
+- `cd /mlflow && ls database/` to see the SQLite DB and confirm where the server writes
+- Run `mlflow experiments search` (since the `mlflow` CLI is installed in this image)
+- Run **any** training script — the `mlflow==2.16.2` install brings `scikit-learn`, `pandas` and `numpy` as transitive deps, so `import sklearn`, `import pandas`, `import numpy` all work in the `mlflow` container too
+
+---
+
+# Running the training via `docker compose exec` (alternative to `docker compose run --rm trainer`)
+
+Two ways to launch a training in chap04:
+
+## Way 1 -- the chap04 canonical command (one-shot `trainer` container)
+
+```bash
+docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
+docker compose run --rm trainer --alpha 0.5 --l1_ratio 0.5
+docker compose run --rm trainer --alpha 0.9 --l1_ratio 0.1
+```
+
+> [!WARNING]
+> The `trainer` service has **no `MLFLOW_TRACKING_URI`** environment variable in chap04 (this is the bug-by-design). Runs end up in `file:///code/mlruns` inside the trainer container and are wiped by `--rm`. You will see **nothing** in the MLflow UI. chap05 fixes this.
+
+## Way 2 -- run the same script via `docker compose exec mlflow` (Docker Desktop friendly)
+
+The `mlflow` server container also has `scikit-learn` + `pandas` + `numpy` installed (transitive deps of `mlflow`). So you can run the trainer script **directly inside the mlflow container**, as long as you tell it where the server is via the `-e` flag:
+
+```bash
+# Same chap04 bug -- run vanishes from the UI:
+docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+
+# Fixed version -- inject MLFLOW_TRACKING_URI=http://localhost:5000 at exec time:
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow \
+  python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow \
+  python trainer/train.py --alpha 0.5 --l1_ratio 0.5
+
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow \
+  python trainer/train.py --alpha 0.9 --l1_ratio 0.1
+```
+
+PowerShell version (one line each):
+
+```powershell
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py --alpha 0.5 --l1_ratio 0.5
+docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py --alpha 0.9 --l1_ratio 0.1
+```
+
+Why `http://localhost:5000` and not `http://mlflow:5000`? Because **`docker compose exec mlflow ...` runs INSIDE the mlflow container**, so the MLflow server is reachable on `localhost` (same container) -- you do NOT need the Docker DNS hostname.
+
+> [!NOTE]
+> `-e MLFLOW_TRACKING_URI=http://localhost:5000` for the exec is functionally the same fix that chap05 will apply permanently to the `trainer` service (via `docker-compose.yml`).
+
+## Side-by-side comparison
+
+| Command | Where does Python run? | URI used | Run in UI? |
+|---|---|---|---|
+| `docker compose run --rm trainer --alpha 0.1` | inside `trainer` container | `file:///code/mlruns` (default) | ❌ no -- bug-by-design |
+| `docker compose exec mlflow python trainer/train.py --alpha 0.1` | inside `mlflow` container | `file:///work/mlruns` (default) | ❌ no -- same bug, different path |
+| `docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py --alpha 0.1` | inside `mlflow` container | `http://localhost:5000` | ✅ YES |
+| `docker compose run --rm -e MLFLOW_TRACKING_URI=http://mlflow:5000 trainer --alpha 0.1` | inside `trainer` container | `http://mlflow:5000` | ✅ YES |
 
 ---
 
