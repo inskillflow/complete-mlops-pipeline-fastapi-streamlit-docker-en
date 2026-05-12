@@ -105,10 +105,11 @@ flowchart TB
         F1 -- recap-net --> F3["cli<br/>(mlflow doctor/artifacts/...)"]
     end
 
-    A --> B --> C
-    B --> D
-    B --> E
-    B --> F
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
 ```
 
 ---
