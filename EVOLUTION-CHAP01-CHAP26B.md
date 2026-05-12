@@ -7,71 +7,53 @@
 ## Vue d'ensemble — la trajectoire complète en un seul diagramme
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph P1["Phase 1 — Fondations"]
-        direction TB
-        c01[chap01<br/>Hello MLflow]
-        c02[chap02<br/>set_tracking_uri]
-        c03[chap03<br/>ElasticNet pipeline]
+        direction LR
+        c01[chap01<br/>Hello MLflow] --> c02[chap02<br/>set_tracking_uri] --> c03[chap03<br/>ElasticNet pipeline]
     end
 
     subgraph P2["Phase 2 — Docker multi-services"]
-        direction TB
-        c04[chap04<br/>+ trainer service<br/>BUG-BY-DESIGN]
-        c05[chap05<br/>+ MLFLOW_TRACKING_URI<br/>env var fix]
+        direction LR
+        c04[chap04<br/>+ trainer service<br/>BUG-BY-DESIGN] --> c05[chap05<br/>+ MLFLOW_TRACKING_URI<br/>env var fix]
     end
 
     subgraph P3["Phase 3 — Logging avancé"]
-        direction TB
-        c06[chap06<br/>create_experiment<br/>+ tags + artifact_loc]
-        c07[chap07<br/>start_run / end_run<br/>active_run]
-        c08[chap08<br/>log_artifacts<br/>+ bulk log_*]
-        c09[chap09<br/>set_tags metadata]
+        direction LR
+        c06[chap06<br/>create_experiment<br/>+ tags + artifact_loc] --> c07[chap07<br/>start_run / end_run<br/>active_run] --> c08[chap08<br/>log_artifacts<br/>+ bulk log_*] --> c09[chap09<br/>set_tags metadata]
     end
 
     subgraph P4["Phase 4 — Multi-runs / multi-experiments"]
-        direction TB
-        c10[chap10<br/>helper + for loop<br/>3 runs / 1 exp]
-        c11[chap11<br/>ElasticNet/Ridge/Lasso<br/>3 expériences]
-        c12[chap12<br/>autolog]
+        direction LR
+        c10[chap10<br/>helper + for loop<br/>3 runs / 1 exp] --> c11[chap11<br/>ElasticNet/Ridge/Lasso<br/>3 expériences] --> c12[chap12<br/>autolog]
     end
 
     subgraph P5["Phase 5 — Production"]
-        direction TB
+        direction LR
         c13[chap13<br/>Postgres backend<br/>+ S3 artifacts]
     end
 
     subgraph P6["Phase 6 — Model packaging"]
-        direction TB
-        c14[chap14<br/>infer_signature]
-        c15[chap15<br/>Schema + ColSpec]
-        c16[chap16<br/>PyFunc wrapper<br/>+ conda env]
-        c17[chap17<br/>load_model<br/>+ predict]
+        direction LR
+        c14[chap14<br/>infer_signature] --> c15[chap15<br/>Schema + ColSpec] --> c16[chap16<br/>PyFunc wrapper<br/>+ conda env] --> c17[chap17<br/>load_model<br/>+ predict]
     end
 
     subgraph P7["Phase 7 — Évaluation"]
-        direction TB
-        c18[chap18<br/>mlflow.evaluate]
-        c19[chap19<br/>custom metrics<br/>+ scatter artifact]
-        c20[chap20<br/>thresholds<br/>+ DummyRegressor]
+        direction LR
+        c18[chap18<br/>mlflow.evaluate] --> c19[chap19<br/>custom metrics<br/>+ scatter artifact] --> c20[chap20<br/>thresholds<br/>+ DummyRegressor]
     end
 
     subgraph P8["Phase 8 — Model Registry"]
-        direction TB
-        c21[chap21<br/>registered_model_name]
-        c22[chap22<br/>log_model + pickle.dump]
-        c23[chap23<br/>register_model post-hoc<br/>+ load by version]
-        c24[chap24<br/>pretrainer + registrar<br/>cloudpickle import]
+        direction LR
+        c21[chap21<br/>registered_model_name] --> c22[chap22<br/>log_model + pickle.dump] --> c23[chap23<br/>register_model post-hoc<br/>+ load by version] --> c24[chap24<br/>pretrainer + registrar<br/>cloudpickle import]
     end
 
     subgraph P9["Phase 9 — MLflow Projects / CLI"]
-        direction TB
-        c25[chap25<br/>with start_run<br/>+ main]
-        c26[chap26<br/>MLproject<br/>+ entry_points]
-        c26b[chap26b<br/>MLflow CLI<br/>doctor/artifacts/exp/runs]
+        direction LR
+        c25[chap25<br/>with start_run<br/>+ main] --> c26[chap26<br/>MLproject<br/>+ entry_points] --> c26b[chap26b<br/>MLflow CLI<br/>doctor/artifacts/exp/runs]
     end
 
-    c01 --> c02 --> c03 --> c04 --> c05 --> c06 --> c07 --> c08 --> c09 --> c10 --> c11 --> c12 --> c13 --> c14 --> c15 --> c16 --> c17 --> c18 --> c19 --> c20 --> c21 --> c22 --> c23 --> c24 --> c25 --> c26 --> c26b
+    P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7 --> P8 --> P9
 
     style c04 fill:#ffd4d4
     style c05 fill:#d4ffd4
@@ -114,7 +96,7 @@ flowchart TB
 
     subgraph E["chap26 — projets MLflow (sans trainer Docker)"]
         direction LR
-        E1[mlflow server] -. CLI mlflow run . -.-> E2["host Python<br/>(MLproject + conda)"]
+        E1[mlflow server] -.->|CLI mlflow run| E2["host Python<br/>(MLproject + conda)"]
     end
 
     subgraph F["chap26b — + service cli"]
@@ -123,7 +105,7 @@ flowchart TB
         F1 -- recap-net --> F3["cli<br/>(mlflow doctor/artifacts/...)"]
     end
 
-    A --> B --> C --> B
+    A --> B --> C
     B --> D
     B --> E
     B --> F
