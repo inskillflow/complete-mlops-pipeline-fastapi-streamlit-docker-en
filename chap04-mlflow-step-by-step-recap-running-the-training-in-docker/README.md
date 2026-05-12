@@ -39,29 +39,64 @@ The full lesson lives at [`../04-practical-work-mlflow-step-by-step-recap-runnin
 >
 > The third mount (`.:/work`) plus `working_dir: /work` is what makes **Docker Desktop → Containers → `mlflow-recap-04` → Exec → `ls`** show all your project files. Without it, `exec` would drop you in `/mlflow/` and you'd see nothing useful. `working_dir:` is a Docker Compose directive that sets the default cwd for `RUN`, `CMD` and any `docker compose exec` — think of it as `cd /work` baked into the container.
 
-## Two ways to launch the training (chap04 = bug-by-design!)
+## chap04 = bug-by-design! Read this BEFORE running anything
 
 > [!WARNING]
-> **Reminder: this chapter intentionally has a bug.** `train.py` does NOT call `mlflow.set_tracking_uri(...)`, so runs are written to `file:///code/mlruns` INSIDE the `trainer` container, then wiped by `--rm`. You will NOT see them in the UI. **chap05 fixes this** with the `MLFLOW_TRACKING_URI` env var.
+> **This chapter intentionally has a bug.** `train.py` does NOT call `mlflow.set_tracking_uri(...)`, so by default runs are written to `file:///code/mlruns` INSIDE the `trainer` container, then wiped by `--rm`. **chap05 fixes this** properly with the `MLFLOW_TRACKING_URI` env var. To deal with this RIGHT NOW you have **two options**: stick with the default `docker-compose.yml` and use the workaround command, OR switch to `docker-compose-option2.yml` where the env var is already wired.
 
-> [!NOTE]
-> **Way A — canonical (one-shot `trainer` container, shows the bug — this is the lesson!):**
-> ```bash
-> docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
-> # runs vanish: trainer wrote them to file:///code/mlruns then --rm deleted the container
-> ```
+## Option 1 — default `docker-compose.yml` (the bug stays)
+
+> [!IMPORTANT]
+> With the default `docker-compose.yml` of this chapter, **the standard `docker compose run --rm trainer ...` will NOT put your runs in the UI**. Only ONE command actually pushes runs to the MLflow server — the one that injects the env var on the fly:
 >
-> **Way B — via `docker compose exec` inside the running `mlflow` container (same bug, different container — runs go to /work/mlruns and the UI still does NOT pick them up because the URI was never set):**
-> ```bash
-> docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
-> ```
->
-> **Way B-fixed — same as Way B but with `MLFLOW_TRACKING_URI` overridden on the fly (run NOW appears in the UI):**
+> ### ✅ ONLY this command works with the default `docker-compose.yml`
 > ```bash
 > docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
 > ```
+> Why it works: MLflow's Python client automatically reads the `MLFLOW_TRACKING_URI` environment variable. We're running INSIDE the `mlflow` container, so `localhost:5000` is the server itself. The runs land in `mlflow.db` + `./mlruns/` and show up in the UI.
 >
-> Way B works because `mlflow==2.16.2` installed in the `mlflow` image brings `scikit-learn`, `pandas` and `numpy` as transitive deps. The whole point of chap04 is to **see** Way A fail silently, understand WHY, and then move on to chap05 where the env var fixes it cleanly. Use Way B-fixed only if you want to peek at what the "fixed" behavior looks like before reading chap05.
+> ### ❌ These two will silently fail (no run in the UI)
+> ```bash
+> docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1          # writes to /code/mlruns inside trainer, then --rm wipes it
+> docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1   # writes to /work/mlruns, UI still has no clue
+> ```
+> They fail because the trainer image has no `MLFLOW_TRACKING_URI` set, and `train.py` does not call `set_tracking_uri()`. The client falls back to `file:///...` and the MLflow server never sees the runs.
+
+## Option 2 — alternative `docker-compose-option2.yml` (the standard command works)
+
+> [!NOTE]
+> If you want `docker compose run --rm trainer ...` to **just work** in chap04 without modifying `train.py`, use the alternative compose file shipped in this chapter: `docker-compose-option2.yml`. The only difference vs the default file is one line:
+> ```yaml
+> trainer:
+>   environment:
+>     MLFLOW_TRACKING_URI: "http://mlflow:5000"   # <-- the ONLY difference
+> ```
+> Same idea as before: MLflow's client picks up the env var automatically, so we don't need to touch `train.py`.
+>
+> ### Tear down the default stack first (so the same container names get freed)
+> ```bash
+> docker compose down
+> ```
+>
+> ### Then bring up the Option 2 stack with the `-f` flag
+> ```bash
+> docker compose -f docker-compose-option2.yml up -d --build
+> docker compose -f docker-compose-option2.yml run --rm trainer --alpha 0.1 --l1_ratio 0.1
+> docker compose -f docker-compose-option2.yml run --rm trainer --alpha 0.5 --l1_ratio 0.5
+> docker compose -f docker-compose-option2.yml run --rm trainer --alpha 0.9 --l1_ratio 0.1
+> docker compose -f docker-compose-option2.yml down
+> ```
+> All three runs now appear in the UI at <http://localhost:5000>. The `docker compose exec mlflow python trainer/train.py ...` command also works without the `-e` flag here, because the env var is already on the trainer service (but `exec` is on the `mlflow` service, so for `exec` you still need to pass `-e` — see Option 1).
+
+## TL;DR which command should I use?
+
+| If you are running...                                                                 | Use this command                                                                                                                          | Runs in the UI? |
+| ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| default `docker-compose.yml`                                                           | `docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1`              | ✅ yes          |
+| default `docker-compose.yml`                                                           | `docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1`                                                                              | ❌ no (bug)     |
+| default `docker-compose.yml`                                                           | `docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1`                                                           | ❌ no (bug)     |
+| `docker-compose-option2.yml` (`-f` flag!)                                              | `docker compose -f docker-compose-option2.yml run --rm trainer --alpha 0.1 --l1_ratio 0.1`                                                | ✅ yes          |
+| `docker-compose-option2.yml` (`-f` flag!)                                              | `docker compose -f docker-compose-option2.yml exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py ...`       | ✅ yes          |
 
 
 This lab shows how to move the training script **out of the MLflow container** and into its own dedicated `trainer` service. From now on every chapter uses the same two-service skeleton: `mlflow` (the tracking server) + `trainer` (the one-shot Python image that runs `train.py`).

@@ -1,0 +1,58 @@
+# =====================================================================
+# OPTION 2 — chap04 "fixed" compose
+# ---------------------------------------------------------------------
+# Same as docker-compose.yml BUT we add MLFLOW_TRACKING_URI on the
+# `trainer` service so the MLflow Python client (which reads that env
+# var automatically) writes runs to the central MLflow server instead
+# of to file:///code/mlruns inside the container.
+#
+# With THIS file, `docker compose run --rm trainer ...` works out of
+# the box (runs show up in the UI). The "bug-by-design" only happens
+# with the default docker-compose.yml from chap04.
+#
+# Usage (note the `-f` flag — IMPORTANT — to point at THIS file):
+#   docker compose -f docker-compose-option2.yml up -d --build
+#   docker compose -f docker-compose-option2.yml run --rm trainer --alpha 0.1 --l1_ratio 0.1
+#   docker compose -f docker-compose-option2.yml down
+# =====================================================================
+
+services:
+  mlflow:
+    build:
+      context: ./mlflow
+    image: mlops/mlflow-recap:latest
+    container_name: mlflow-recap-04
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./database:/mlflow/database     # bind mount -> host folder MUST exist
+      - ./mlruns:/mlflow/mlruns         # bind mount -> host folder MUST exist
+      - .:/work                         # whole project visible from Docker Desktop -> Exec -> ls
+    working_dir: /work
+    networks:
+      - recap-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  trainer:
+    build:
+      context: ./trainer
+    image: mlops/trainer-recap:latest
+    container_name: trainer-recap-04
+    environment:
+      MLFLOW_TRACKING_URI: "http://mlflow:5000"   # <-- the ONLY difference vs docker-compose.yml
+    volumes:
+      - ./data:/code/data
+    networks:
+      - recap-net
+    depends_on:
+      mlflow:
+        condition: service_healthy
+
+networks:
+  recap-net:
+    driver: bridge
