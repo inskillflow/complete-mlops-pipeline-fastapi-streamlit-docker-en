@@ -73,36 +73,49 @@ Voici comment la pile Docker grossit au fil des chapitres :
 ```mermaid
 flowchart TB
     subgraph A["chap01-03 — 1 service"]
-        direction LR
+        direction TB
         A1["mlflow<br/>(server + script local)"]
     end
 
     subgraph B["chap04-12 — 2 services"]
-        direction LR
-        B1[mlflow] -- recap-net --> B2[trainer]
+        direction TB
+        B1[mlflow]
+        B2[trainer]
+        B1 -- recap-net --> B2
     end
 
     subgraph C["chap13 — 3 services (production)"]
-        direction LR
-        C1[mlflow] -- recap-net --> C2[trainer]
-        C1 -- recap-net --> C3[(postgres<br/>backend store)]
+        direction TB
+        C1[mlflow]
+        C2[trainer]
+        C3[(postgres<br/>backend store)]
+        C1 -- recap-net --> C2
+        C1 -- recap-net --> C3
     end
 
     subgraph D["chap24 — pretrainer + registrar"]
-        direction LR
-        D1[mlflow] -- recap-net --> D3[registrar]
-        D2[pretrainer] -. shared volume .-> D3
+        direction TB
+        D1[mlflow]
+        D2[pretrainer]
+        D3[registrar]
+        D1 -- recap-net --> D3
+        D2 -. shared volume .-> D3
     end
 
     subgraph E["chap26 — projets MLflow (sans trainer Docker)"]
-        direction LR
-        E1[mlflow server] -.->|CLI mlflow run| E2["host Python<br/>(MLproject + conda)"]
+        direction TB
+        E1[mlflow server]
+        E2["host Python<br/>(MLproject + conda)"]
+        E1 -.->|CLI mlflow run| E2
     end
 
     subgraph F["chap26b — + service cli"]
-        direction LR
-        F1[mlflow] -- recap-net --> F2[trainer]
-        F1 -- recap-net --> F3["cli<br/>(mlflow doctor/artifacts/...)"]
+        direction TB
+        F1[mlflow]
+        F2[trainer]
+        F3["cli<br/>(mlflow doctor/artifacts/...)"]
+        F1 -- recap-net --> F2
+        F1 -- recap-net --> F3
     end
 
     A --> B
