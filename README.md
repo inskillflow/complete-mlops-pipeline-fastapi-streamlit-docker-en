@@ -1,6 +1,6 @@
 ﻿<a id="top"></a>
 
-# MLOps with MLflow, FastAPI & Streamlit — full course
+# MLOps with MLflow, FastAPI & Streamlit — full course 🚀
 
 A hands-on, **chapter-by-chapter** course that teaches MLOps by building one realistic stack:
 
