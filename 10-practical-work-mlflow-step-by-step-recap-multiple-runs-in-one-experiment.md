@@ -1,410 +1,291 @@
-﻿<a id="top"></a>
+﻿# chap10 - Step-by-step recap: multiple runs in one experiment (helper + `for` loop)
 
-# Chapter 10 — Step-by-step recap: launching **multiple runs** in **one** experiment
+The full lesson lives at [../10-practical-work-mlflow-step-by-step-recap-multiple-runs-in-one-experiment.md](../10-practical-work-mlflow-step-by-step-recap-multiple-runs-in-one-experiment.md).
 
-## Table of Contents
+> **In one line.** This chapter is about how to **factor the per-run logic into a helper `train_one_run(name, alpha, l1_ratio, ...)` and iterate over a list of `CONFIGS` so a single `docker compose run` creates 3+ runs ready to compare**.
 
-| # | Section |
-|---|---|
-| 1 | [Objective](#section-1) |
-| 2 | [What we add today vs chap 09](#section-2) |
-| 3 | [Why "many runs in one experiment"?](#section-3) |
-| 4 | [Two ways to write it: copy-paste vs `for` loop](#section-4) |
-| 5 | [Project structure](#section-5) |
-| 6 | [The code](#section-6) |
-| 7 | [Run it, compare the runs in the UI](#section-7) |
-| 8 | [Bonus — nested runs (`nested=True`)](#section-8) |
-| 9 | [Mini exercise — your own grid](#section-9) |
-| 10 | [Tear down](#section-10) |
-| 11 | [Recap and next chapter](#section-11) |
 
----
+## Before you start — Create the host folders!
 
-<a id="section-1"></a>
+> [!IMPORTANT]
+> **You MUST create the local folders `database/` and `mlruns/` BEFORE the first `docker compose up`.**
+>
+> This chapter's `docker-compose.yml` uses **bind mounts** (host folders mapped INTO the container), not anonymous Docker volumes. If the host folders don't exist, Docker will silently create them as **empty root-owned directories** that are hard to inspect or clean up from your editor on Windows, and you'll wonder why `mlflow.db` "disappears" when you run `docker compose down -v`.
+>
+> ### Create them now
+> ```bash
+> mkdir database mlruns       # bash / Git Bash / macOS / Linux / WSL
+> ```
+> ```powershell
+> New-Item -ItemType Directory database, mlruns -Force | Out-Null   # PowerShell
+> ```
+>
+> ### What ends up in those folders — and what `working_dir` is for
+>
+> | Host (your laptop, this chapter folder) | Container path (`mlflow` service)   | What lives there                                |
+> | --------------------------------------- | ----------------------------------- | ----------------------------------------------- |
+> | `./database/`                           | `/mlflow/database/`                 | `mlflow.db` — the SQLite tracking store         |
+> | `./mlruns/`                             | `/mlflow/mlruns/`                   | Artifacts: models, plots, metric files          |
+> | `.` (the entire chapter folder)         | `/work/`  ←  this is `working_dir:` | The full project tree: `trainer/`, `data/`, ... |
+>
+> The third mount (`.:/work`) plus `working_dir: /work` is what makes **Docker Desktop → Containers → `mlflow-recap-XX` → Exec → `ls`** show all your project files. Without it, `exec` would drop you in `/mlflow/` and you'd see nothing useful. `working_dir:` is a Docker Compose directive that sets the default cwd for `RUN`, `CMD` and any `docker compose exec` — think of it as `cd /work` baked into the container.
 
-## 1. Objective
+## Two ways to launch the training
 
-So far, every chapter logged **one** run per execution of `train.py`. Today we launch **three runs back-to-back inside the same experiment** (`experiment_5`), each with a different `(alpha, l1_ratio)`. The goal is to compare them side-by-side in the MLflow UI to find the best `(alpha, l1_ratio)` for our ElasticNet baseline.
+> [!NOTE]
+> **Way A — canonical (one-shot `trainer` container, recommended for the lesson):**
+> ```bash
+> docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> **Way B — via `docker compose exec` inside the running `mlflow` container (Docker Desktop friendly):**
+> ```bash
+> docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> Both run the same `train.py`. Way B works because `mlflow==2.16.2` brings `scikit-learn`, `pandas` and `numpy` as transitive deps. From chap05 onwards, the `MLFLOW_TRACKING_URI` env var is set on the `trainer` service in `docker-compose.yml` and `train.py` reads it via `os.getenv(...)`, so both Way A and Way B "just work" and the runs appear in the MLflow UI under the correct experiment. If a run does NOT appear in the UI, force the URI with: `docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py ...`
 
-Same Docker stack as before (`mlflow` + `trainer`). Only `train.py` evolves.
+## What is new vs chap09
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+- `train_one_run(name, alpha, l1_ratio, ...)` -> 1 function = 1 self-contained run with its own `start_run` + `log_*` + `log_model`
+- `CONFIGS = [{...}, {...}, {...}]` + `for cfg in CONFIGS:` -> 3 runs in one process
+- Per-run `run_name` (`run1.1`, `run2.1`, `run3.1`) for human-friendly side-by-side
+- All runs land in `experiment_5` -> tick them and click **Compare** in the UI
 
----
 
-<a id="section-2"></a>
+## Project structure
 
-## 2. What we add today vs chap 09
-
-| Diff | What |
-|---|---|
-| Wrap the per-run logic in a small helper `train_one_run(name, alpha, l1_ratio)` | DRY: train, log params, log metrics, log model, log artifacts. |
-| Loop `for cfg in CONFIGS:` and call the helper | One execution → 3 runs in `experiment_5`. |
-| Each run gets a meaningful `run_name` (`"run1.1"`, `"run2.1"`, `"run3.1"`) | Easy to find in the UI. |
-| Print `last_active_run()` after the loop | Confirms the **last** run, even though we ran several. |
-
-Everything else (env-var URI, multi-service Docker, bulk `log_params`/`log_metrics`, `log_artifacts("data/")`, `set_tags(...)`, `get_artifact_uri()`) is exactly as in chap 09.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-3"></a>
-
-## 3. Why "many runs in one experiment"?
-
-An **experiment** is the project-level folder ("predict wine quality with ElasticNet"). A **run** is one attempt at solving it ("alpha=0.7, l1_ratio=0.7", "alpha=0.4, l1_ratio=0.4"…).
-
-Putting many runs in **the same experiment** is what unlocks the MLflow UI's killer feature:
-
-- The runs table shows them side-by-side.
-- The **Compare** button → metric charts (RMSE vs alpha, etc.) and parallel-coordinate plots.
-- The search bar filters within the experiment (`metrics.rmse < 0.7`, `params.alpha = "0.4"`, `tags.…`).
-
-Splitting them across N experiments **would lose** that comparison.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-4"></a>
-
-## 4. Two ways to write it: copy-paste vs `for` loop
-
-The naïve approach (the one in many tutorials) copy-pastes the same block 3 times, changing only `alpha`, `l1_ratio` and `run_name`. It works, but every bug fix needs to be applied 3× and the file balloons to 200 lines.
-
-A small helper + a `for` loop solves it cleanly:
-
-```python
-CONFIGS = [
-    ("run1.1", args.alpha, args.l1_ratio),   # CLI-driven
-    ("run2.1", 0.9,        0.9),
-    ("run3.1", 0.4,        0.4),
-]
-
-for name, alpha, l1 in CONFIGS:
-    train_one_run(name, alpha, l1)
-```
-
-**Same MLflow output, half the lines, one bug to fix.** This is the pattern we use today.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-5"></a>
-
-## 5. Project structure
+The project follows the canonical recap layout (see [section 8 of the root README](../README.md#section-8) for the full reference):
 
 ```text
-chap10-mlflow-step-by-step-recap-multiple-runs-in-one-experiment/
-├── README.md
-├── docker-compose.yml
-├── data/
-│   └── red-wine-quality.csv
-├── mlflow/
-│   └── Dockerfile
-└── trainer/
-    ├── Dockerfile
-    ├── requirements.txt
-    └── train.py            ← helper + for loop
+chap10-.../
++- README.md                 <- this file
++- docker-compose.yml        <- mlflow + trainer
++- mlflow/
+|  +- Dockerfile             <- mlflow tracking server image
++- data/
+|  +- red-wine-quality.csv
++- trainer/                  <- training service
+   +- Dockerfile
+   +- requirements.txt
+   +- train.py
 ```
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+## Run it (100% Docker, no Python on the host)
 
----
+This is the **canonical run sequence** for the recap series. It is the same for every chapter from 04 onward; only the trainer arguments change.
 
-<a id="section-6"></a>
-
-## 6. The code
-
-### 6.1 `trainer/train.py`
-
-```python
-import argparse
-import logging
-import os
-import warnings
-
-import mlflow
-import mlflow.sklearn
-import numpy as np
-import pandas as pd
-from sklearn.linear_model import ElasticNet
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import train_test_split
-
-logging.basicConfig(level=logging.WARN)
-logger = logging.getLogger(__name__)
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--alpha", type=float, required=False, default=0.7)
-parser.add_argument("--l1_ratio", type=float, required=False, default=0.7)
-args = parser.parse_args()
-
-
-def eval_metrics(actual, pred):
-    rmse = np.sqrt(mean_squared_error(actual, pred))
-    mae = mean_absolute_error(actual, pred)
-    r2 = r2_score(actual, pred)
-    return rmse, mae, r2
-
-
-COMMON_TAGS = {
-    "engineering":       "ML platform",
-    "release.candidate": "RC1",
-    "release.version":   "2.0",
-}
-
-
-def train_one_run(run_name, alpha, l1_ratio, train_x, train_y, test_x, test_y):
-    """Train ONE ElasticNet model and log everything to MLflow under `run_name`."""
-    mlflow.start_run(run_name=run_name)
-
-    mlflow.set_tags(COMMON_TAGS)
-
-    current = mlflow.active_run()
-    print(f"\n>>> Run started: name={current.info.run_name}, id={current.info.run_id}")
-
-    lr = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42)
-    lr.fit(train_x, train_y)
-    preds = lr.predict(test_x)
-    rmse, mae, r2 = eval_metrics(test_y, preds)
-
-    print(f"  ElasticNet(alpha={alpha:.2f}, l1_ratio={l1_ratio:.2f})  "
-          f"RMSE={rmse:.4f}  MAE={mae:.4f}  R2={r2:.4f}")
-
-    mlflow.log_params({"alpha": alpha, "l1_ratio": l1_ratio})
-    mlflow.log_metrics({"rmse": rmse, "r2": r2, "mae": mae})
-    mlflow.sklearn.log_model(lr, "my_new_model_1")
-    mlflow.log_artifacts("data/")
-
-    print(f"  Artifact path: {mlflow.get_artifact_uri()}")
-
-    mlflow.end_run()
-
-
-if __name__ == "__main__":
-    warnings.filterwarnings("ignore")
-    np.random.seed(40)
-
-    mlflow.set_tracking_uri(
-        os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-    )
-    print("The set tracking URI is", mlflow.get_tracking_uri())
-
-    exp = mlflow.set_experiment(experiment_name="experiment_5")
-    print(f"Name: {exp.name}")
-    print(f"Experiment_id: {exp.experiment_id}")
-
-    # Load + split data ONCE (shared across all runs)
-    data = pd.read_csv("data/red-wine-quality.csv")
-    train, test = train_test_split(data)
-
-    os.makedirs("data", exist_ok=True)
-    train.to_csv("data/train.csv", index=False)
-    test.to_csv("data/test.csv", index=False)
-
-    train_x = train.drop(["quality"], axis=1)
-    test_x = test.drop(["quality"], axis=1)
-    train_y = train[["quality"]]
-    test_y = test[["quality"]]
-
-    # === The 3 configs ===
-    CONFIGS = [
-        ("run1.1", args.alpha, args.l1_ratio),     # default = CLI args
-        ("run2.1", 0.9,        0.9),
-        ("run3.1", 0.4,        0.4),
-    ]
-
-    for name, alpha, l1 in CONFIGS:
-        train_one_run(name, alpha, l1, train_x, train_y, test_x, test_y)
-
-    # last_active_run() works AFTER the loop too
-    run = mlflow.last_active_run()
-    print(f"\nRecent active run id   : {run.info.run_id}")
-    print(f"Recent active run name : {run.info.run_name}")
-```
-
-### 6.2 `docker-compose.yml`
-
-Same skeleton as 09, only `container_name`s change:
-
-```yaml
-services:
-  mlflow:
-    build: { context: ./mlflow }
-    image: mlops/mlflow-recap:latest
-    container_name: mlflow-recap-10
-    ports:
-      - "5000:5000"
-    volumes:
-      - mlflow-db:/mlflow/database
-      - mlflow-artifacts:/mlflow/mlruns
-    networks: [recap-net]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000').status==200 else 1)"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  trainer:
-    build: { context: ./trainer }
-    image: mlops/trainer-recap:latest
-    container_name: trainer-recap-10
-    environment:
-      MLFLOW_TRACKING_URI: "http://mlflow:5000"
-    volumes:
-      - ./data:/code/data
-    networks: [recap-net]
-    depends_on:
-      mlflow: { condition: service_healthy }
-
-volumes:
-  mlflow-db:
-  mlflow-artifacts:
-
-networks:
-  recap-net:
-    driver: bridge
-```
-
-### 6.3 `mlflow/Dockerfile`, `trainer/Dockerfile`, `trainer/requirements.txt`
-
-Identical to chap 07/h/i.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-7"></a>
-
-## 7. Run it, compare the runs in the UI
+### 1. Move into the chapter
 
 ```bash
-cd chap10-mlflow-step-by-step-recap-multiple-runs-in-one-experiment
+cd chap10-mlflow-step-by-step-recap...
+```
+
+### 2. Build everything and start the MLflow server in the background
+
+```bash
 docker compose up -d --build mlflow
+```
+
+- `-d` runs the server detached so this terminal stays free for the trainer.
+- `--build` forces a rebuild if any `Dockerfile` or `requirements.txt` changed.
+
+Verify with:
+
+```bash
+docker compose ps
+# mlflow-recap-10    Up X seconds (healthy)
+```
+
+Open [http://localhost:5000](http://localhost:5000). The UI is empty for now (only `Default`) unless you have persistent volumes from a previous chapter.
+
+### 3. Run the trainer (with CLI args)
+
+```bash
 docker compose run --rm trainer --alpha 0.7 --l1_ratio 0.7
 ```
 
-Trainer's stdout (3 runs in a row):
+### 4. Refresh the MLflow UI
 
-```text
-The set tracking URI is http://mlflow:5000
-Name: experiment_5
-Experiment_id: 1
+Open / refresh [http://localhost:5000](http://localhost:5000). Expected:
 
->>> Run started: name=run1.1, id=8a4f...d1
-  ElasticNet(alpha=0.70, l1_ratio=0.70)  RMSE=0.78...  MAE=0.62...  R2=0.10...
-  Artifact path: mlflow-artifacts:/1/8a4f...d1/artifacts
+- Experiment: `experiment_5`
+- 3 runs in `experiment_5` (`run1.1`, `run2.1`, `run3.1`). Open the experiment, tick the 3 rows, click **Compare**.
 
->>> Run started: name=run2.1, id=b1c3...92
-  ElasticNet(alpha=0.90, l1_ratio=0.90)  RMSE=0.81...  MAE=0.65...  R2=0.05...
-  Artifact path: mlflow-artifacts:/1/b1c3...92/artifacts
+> **Chapter quirk.** The `--alpha` / `--l1_ratio` CLI args become **defaults** that the script overrides per `CONFIGS` entry. Edit `CONFIGS` in `trainer/train.py` to grow the grid.
 
->>> Run started: name=run3.1, id=f7e2...10
-  ElasticNet(alpha=0.40, l1_ratio=0.40)  RMSE=0.74...  MAE=0.58...  R2=0.20...
-  Artifact path: mlflow-artifacts:/1/f7e2...10/artifacts
-
-Recent active run id   : f7e2...10
-Recent active run name : run3.1
-```
-
-In the UI ([http://localhost:5000](http://localhost:5000)):
-
-1. Open **`experiment_5`** → 3 rows: `run1.1`, `run2.1`, `run3.1`.
-2. **Tick all 3** → click **"Compare"** at the top of the table.
-3. You get:
-   - A **Parameter table** showing `alpha` / `l1_ratio` per run.
-   - A **Metric table** showing `rmse`, `mae`, `r2` per run.
-   - A **Scatter / Parallel-coordinates** view to spot trends.
-
-> [!TIP]
-> In the runs table, click the column header **`metrics.rmse`** to sort by RMSE — the best run jumps to the top.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-8"></a>
-
-## 8. Bonus — nested runs (`nested=True`)
-
-A common pattern: a **parent** run that "owns" several **children** (e.g. one parent per CV fold, children per fold/hyperparam combo). MLflow expresses this with **`nested=True`**:
-
-```python
-with mlflow.start_run(run_name="parent_sweep") as parent:
-    mlflow.log_param("strategy", "grid_3_configs")
-    for name, alpha, l1 in CONFIGS:
-        with mlflow.start_run(run_name=name, nested=True):
-            # … train + log as usual …
-```
-
-In the UI, the parent appears as a single row that expands to reveal its children. Useful when the parent itself logs a summary (e.g. "best RMSE among my children = 0.72"). For this chapter we kept it flat to focus on the loop pattern.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-9"></a>
-
-## 9. Mini exercise — your own grid
-
-Add **two more configs** to `CONFIGS` and re-run the trainer:
-
-```python
-CONFIGS = [
-    ("run1.1", 0.7, 0.7),
-    ("run2.1", 0.9, 0.9),
-    ("run3.1", 0.4, 0.4),
-    ("run4.1", 0.1, 0.1),   # NEW
-    ("run5.1", 0.05, 0.5),  # NEW
-]
-```
+### 5. Tear down
 
 ```bash
-docker compose run --rm trainer
+docker compose down       # keep volumes (DB + artifacts survive)
+docker compose down -v    # wipe everything (DB + artifacts + this chapter's named volumes)
 ```
 
-In the UI:
+## What ends up on your host
 
-```text
-metrics.rmse < 0.75
-```
+This chapter uses **named Docker volumes** rather than host-side bind mounts for the MLflow data:
 
-Only the runs that actually beat 0.75 RMSE survive the filter. Now you can spot the winning hyperparams at a glance — that's the whole point of grouping runs in one experiment.
+| Volume | Contents |
+|---|---|
+| `mlflow-db`  | SQLite metadata DB (experiments, runs, registered models) |
+| `mlflow-artifacts` | Pickled models, signatures, plots, CSVs |
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
 
----
-
-<a id="section-10"></a>
-
-## 10. Tear down
+Inspect them with:
 
 ```bash
-docker compose down       # keep volumes
-docker compose down -v    # wipe everything
+docker volume ls | grep recap
+docker volume inspect <volume_name>
 ```
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+These volumes survive `docker compose down`. Only `docker compose down -v` wipes them.
 
----
+## Recap (bash, one-shot)
 
-<a id="section-11"></a>
+```bash
+cd chap10-mlflow-step-by-step-recap...
 
-## 11. Recap and next chapter
+docker compose up -d --build mlflow
 
-You now know how to launch **N runs in one experiment** with a clean helper + `for` loop, plus the optional `nested=True` parent/child pattern.
+docker compose run --rm trainer --alpha 0.7 --l1_ratio 0.7
 
-Next: **[Chapter 11](./11-practical-work-mlflow-step-by-step-recap-multiple-experiments-comparing-elasticnet-ridge-lasso.md)** — same idea, but **across multiple experiments**, one per algorithm (`exp_multi_EL`, `exp_multi_Ridge`, `exp_multi_Lasso`), so we can compare **algorithms**, not just hyperparams.
+# Open http://localhost:5000 and inspect the runs in experiment 'experiment_5'.
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+docker compose down
+```
 
----
+## Recap (Windows PowerShell)
 
-<p align="center">
-  <strong>End of Chapter 10 — multiple runs in one experiment</strong><br/>
-  <a href="#top">↑ Back to the top</a>
-</p>
+```powershell
+cd chap10-mlflow-step-by-step-recap...
+
+docker compose up -d --build mlflow
+
+docker compose run --rm trainer --alpha 0.7 --l1_ratio 0.7
+
+# Open http://localhost:5000 and inspect the runs in experiment 'experiment_5'.
+
+docker compose down
+```
+
+## Enter the trainer container manually (debugging)
+
+Sometimes you want a shell inside the trainer to inspect the filesystem, the env, or to step through the script line by line:
+
+```bash
+docker compose run --rm --entrypoint bash trainer
+# inside:
+#   cat train.py
+#   ls /code/data
+#   env | grep MLFLOW
+#   python train.py --alpha 0.5 --l1_ratio 0.5
+#   exit
+```
+
+The `--entrypoint bash` flag overrides the image's `ENTRYPOINT ["python", "train.py"]` and drops you into a shell instead.
+
+## Troubleshooting
+
+<details>
+<summary><strong>Port 5000 already in use on Windows</strong></summary>
+
+The MLflow server publishes `5000:5000`. If something else is already on port 5000 the container fails to start.
+
+CMD:
+
+```bat
+netstat -ano | findstr :5000
+:: Last column is the PID. Then:
+tasklist | findstr 12345
+taskkill /PID 12345 /F
+```
+
+PowerShell:
+
+```powershell
+Get-NetTCPConnection -LocalPort 5000
+Stop-Process -Id 12345 -Force
+```
+
+Port 5000 is the most common collision (Flask dev servers, AirPlay on macOS, `Hyper-V`, `IIS`, `netbios`, a previous MLflow chapter you forgot to `docker compose down`).
+
+</details>
+
+<details>
+<summary><strong>Docker Desktop frozen / containers stuck in `Created`</strong></summary>
+
+Open **PowerShell as Administrator**:
+
+```powershell
+# 1. Stop Docker Desktop processes
+Get-Process *docker* -ErrorAction SilentlyContinue | Stop-Process -Force
+
+# 2. Stop the Docker service
+Stop-Service com.docker.service -Force -ErrorAction SilentlyContinue
+
+# 3. Force-stop the WSL backend
+wsl --shutdown
+```
+
+Wait 10-15 seconds, then:
+
+```powershell
+Start-Service com.docker.service
+Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+```
+
+If still frozen:
+
+```powershell
+taskkill /F /IM "Docker Desktop.exe"
+taskkill /F /IM "com.docker.backend.exe"
+taskkill /F /IM "com.docker.service.exe"
+taskkill /F /IM "dockerd.exe"
+wsl --shutdown
+```
+
+Then restart Docker Desktop from the Start menu.
+
+</details>
+
+<details>
+<summary><strong>Trainer says `Tracking URI: file:///code/mlruns`</strong></summary>
+
+That means the trainer did NOT see `MLFLOW_TRACKING_URI`. Three places to check:
+
+1. `docker-compose.yml` -> trainer -> `environment: MLFLOW_TRACKING_URI:` is present.
+2. You launched via `docker compose run --rm trainer ...` (not `docker run` directly).
+3. The MLflow service is healthy: `docker compose ps` -> `mlflow-recap-10 ... healthy`.
+
+Override at runtime if needed:
+
+```bash
+docker compose run --rm -e MLFLOW_TRACKING_URI=http://mlflow:5000 trainer --alpha 0.4 --l1_ratio 0.4
+```
+
+</details>
+
+<details>
+<summary><strong>Trainer fails immediately with `Image not found` / `manifest unknown`</strong></summary>
+
+You forgot `--build` or the trainer image is stale.
+
+```bash
+docker compose down
+docker compose up -d --build mlflow
+docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.4
+```
+
+If `--build` itself fails, prune and retry:
+
+```bash
+docker compose down -v
+docker builder prune -af
+docker compose up -d --build mlflow
+```
+
+</details>
+
+## Next chapter
+
+**Next**: [chap11](../11-practical-work-mlflow-step-by-step-recap-multiple-experiments-comparing-elasticnet-ridge-lasso.md) -- generalize the loop to **multiple experiments**: register 3 model factories (`ElasticNet`, `Ridge`, `Lasso`) and create one experiment per algorithm with its own runs.

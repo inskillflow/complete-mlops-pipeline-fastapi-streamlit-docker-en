@@ -1,391 +1,276 @@
-﻿<a id="top"></a>
+﻿# chap26b - Step-by-step recap: the MLflow CLI (`mlflow doctor`, `mlflow artifacts`, `mlflow experiments`, `mlflow runs`, `mlflow db upgrade`)
 
-# Chapter 26b — Step-by-step recap: the MLflow CLI (`mlflow doctor`, `mlflow artifacts`, `mlflow db upgrade`, `mlflow experiments`, `mlflow runs`)
+The full lesson lives at [`../26b-mlflow-step-by-step-recap-mlflow-cli-doctor-artifacts-experiments-runs.md`](../26b-mlflow-step-by-step-recap-mlflow-cli-doctor-artifacts-experiments-runs.md).
 
-## Table of Contents
+> **In one line.** This chapter is about how to **drive every MLflow administrative task from a dedicated `cli` Docker service** instead of opening Python: `mlflow doctor`, `mlflow experiments create/rename/delete/restore/search/csv`, `mlflow runs list/describe/delete/restore`, `mlflow artifacts list/download/log-artifacts`, `mlflow db upgrade`.
 
-| # | Section |
-|---|---|
-| 1 | [Objective](#section-1) |
-| 2 | [Where to run these commands? The `cli` service pattern](#section-2) |
-| 3 | [Project structure](#section-3) |
-| 4 | [Seeding some data so the commands have something to show](#section-4) |
-| 5 | [`mlflow doctor` — installation health check](#section-5) |
-| 6 | [`mlflow experiments` — create / rename / delete / restore / search / csv](#section-6) |
-| 7 | [`mlflow runs` — list / describe / delete / restore](#section-7) |
-| 8 | [`mlflow artifacts` — list / download / log-artifacts](#section-8) |
-| 9 | [`mlflow db upgrade` — apply schema migrations](#section-9) |
-| 10 | [Tips: `MLFLOW_TRACKING_URI`, output formats, scripting](#section-10) |
-| 11 | [Tear down](#section-11) |
-| 12 | [Recap and next chapter](#section-12) |
 
----
+## Before you start — Create the host folders!
 
-<a id="section-1"></a>
+> [!IMPORTANT]
+> **You MUST create the local folders `database/` and `mlruns/` BEFORE the first `docker compose up`.**
+>
+> This chapter's `docker-compose.yml` uses **bind mounts** (host folders mapped INTO the container), not anonymous Docker volumes. If the host folders don't exist, Docker will silently create them as **empty root-owned directories** that are hard to inspect or clean up from your editor on Windows, and you'll wonder why `mlflow.db` "disappears" when you run `docker compose down -v`.
+>
+> ### Create them now
+> ```bash
+> mkdir database mlruns       # bash / Git Bash / macOS / Linux / WSL
+> ```
+> ```powershell
+> New-Item -ItemType Directory database, mlruns -Force | Out-Null   # PowerShell
+> ```
+>
+> ### What ends up in those folders — and what `working_dir` is for
+>
+> | Host (your laptop, this chapter folder) | Container path (`mlflow` service)   | What lives there                                |
+> | --------------------------------------- | ----------------------------------- | ----------------------------------------------- |
+> | `./database/`                           | `/mlflow/database/`                 | `mlflow.db` — the SQLite tracking store         |
+> | `./mlruns/`                             | `/mlflow/mlruns/`                   | Artifacts: models, plots, metric files          |
+> | `.` (the entire chapter folder)         | `/work/`  ←  this is `working_dir:` | The full project tree: `trainer/`, `data/`, ... |
+>
+> The third mount (`.:/work`) plus `working_dir: /work` is what makes **Docker Desktop → Containers → `mlflow-recap-XX` → Exec → `ls`** show all your project files. Without it, `exec` would drop you in `/mlflow/` and you'd see nothing useful. `working_dir:` is a Docker Compose directive that sets the default cwd for `RUN`, `CMD` and any `docker compose exec` — think of it as `cd /work` baked into the container.
 
-## 1. Objective
+## Two ways to launch the training
 
-Up to chap 26 everything was **Python code talking to MLflow**. But MLflow ships with a full **command-line interface** that does most of what the Python SDK does — and a few admin things the SDK doesn't. The CLI is what you reach for to:
+> [!NOTE]
+> **Way A — canonical (one-shot `trainer` container, recommended for the lesson):**
+> ```bash
+> docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> **Way B — via `docker compose exec` inside the running `mlflow` container (Docker Desktop friendly):**
+> ```bash
+> docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> Both run the same `train.py`. Way B works because `mlflow==2.16.2` brings `scikit-learn`, `pandas` and `numpy` as transitive deps. From chap05 onwards, the `MLFLOW_TRACKING_URI` env var is set on the `trainer` service in `docker-compose.yml` and `train.py` reads it via `os.getenv(...)`, so both Way A and Way B "just work" and the runs appear in the MLflow UI under the correct experiment. If a run does NOT appear in the UI, force the URI with: `docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py ...`
 
-- Diagnose a misbehaving installation: `mlflow doctor`.
-- Browse / mutate the registry from the terminal: `mlflow experiments ...`, `mlflow runs ...`.
-- Pull artifacts to disk for inspection or sharing: `mlflow artifacts download ...`.
-- Apply DB migrations after upgrading MLflow itself: `mlflow db upgrade ...`.
-- Drive everything from shell scripts and CI pipelines.
+## What is new vs chap26
 
-Today's chapter walks through the entire essential CLI surface, all run from a small **`cli` Docker service** that talks to our existing MLflow tracking server.
+- A third service `cli` (image `mlops/mlflow-cli`) with **only** `mlflow` installed and `MLFLOW_TRACKING_URI=http://mlflow:5000` baked in via env var.
+- No `ENTRYPOINT` on the `cli` image -- you spawn arbitrary CLI commands with `docker compose run --rm cli mlflow ...` (or open a shell with `docker compose run --rm --entrypoint sh cli`).
+- A `./cli_artifact:/artifacts` host bind mount on the `cli` service -- the natural target for `mlflow artifacts download` outputs and `mlflow experiments csv --filename /artifacts/...`.
+- The `trainer` is unchanged from chap25's idiomatic context-manager style (`with mlflow.start_run(...)` inside a `main()`), used here only to **seed** a couple of runs so the CLI demos have something to inspect.
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-2"></a>
-
-## 2. Where to run these commands? The `cli` service pattern
-
-The MLflow CLI is just `pip install mlflow`. Every container we built so far already has it. But the cleanest pattern in a multi-service setup is a **dedicated `cli` service**:
-
-- Built from a tiny image with only `mlflow`.
-- Has `MLFLOW_TRACKING_URI=http://mlflow:5000` baked in via env var.
-- Mounts a `cli_artifact/` directory on the host — handy for `mlflow artifacts download` outputs.
-- No `ENTRYPOINT` — you spawn arbitrary commands with `docker compose run --rm cli mlflow ...` (or open a shell with `docker compose run --rm --entrypoint sh cli`).
-
-This way the same workflow that runs locally also runs in CI: `docker compose run --rm cli mlflow runs list --experiment-id 1`.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-3"></a>
-
-## 3. Project structure
+## Project structure
 
 ```text
-chap26b-mlflow-step-by-step-recap-mlflow-cli-doctor-artifacts-experiments-runs/
-├── README.md
-├── docker-compose.yml
-├── data/
-│   └── red-wine-quality.csv
-├── mlflow/
-│   └── Dockerfile
-├── trainer/                ← seeds 1-2 runs so we have something to inspect
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── train.py
-└── cli/                    ← the CLI sandbox
-    ├── Dockerfile
-    └── requirements.txt
+chap26b-.../
++- README.md                 <- this file
++- docker-compose.yml        <- mlflow + trainer + cli
++- data/
+|  +- red-wine-quality.csv
++- mlflow/
+|  +- Dockerfile             <- mlflow tracking server image
++- trainer/                  <- seeds 1-2 runs so we have something to inspect
+|  +- Dockerfile
+|  +- requirements.txt
+|  +- train.py
++- cli/                      <- the CLI sandbox
+|  +- Dockerfile
+|  +- requirements.txt
++- cli_artifact/             <- host bind-mount for download/csv outputs (created on first use)
 ```
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+## Run it (100% Docker, no Python on the host)
 
----
-
-<a id="section-4"></a>
-
-## 4. Seeding some data so the commands have something to show
-
-Spin everything up and produce a couple of runs first:
+### 1. Move into the chapter
 
 ```bash
 cd chap26b-mlflow-step-by-step-recap-mlflow-cli-doctor-artifacts-experiments-runs
-docker compose up -d --build mlflow
+```
 
+### 2. Build everything and start the MLflow server in the background
+
+```bash
+docker compose up -d --build mlflow
+```
+
+Verify with:
+
+```bash
+docker compose ps
+# mlflow-recap-26b    Up X seconds (healthy)
+```
+
+Open [http://localhost:5000](http://localhost:5000). Empty UI at this stage (only `Default`).
+
+### 3. Seed two runs for the CLI demos
+
+```bash
 docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.4
 docker compose run --rm trainer --alpha 0.6 --l1_ratio 0.6
 ```
 
-Now we have an experiment (`experiment_cli_demo`) with 2 runs and one `model/` artifact in each. Note one of the run ids — we'll use it below as `<RUN_ID>`. Find it in the UI ([http://localhost:5000](http://localhost:5000)) or via `mlflow runs list` (next sections).
+Refresh the UI -> experiment `experiment_cli_demo` with 2 runs, each containing a `model/` artifact. Note one of the run ids; the lesson refers to it as `<RUN_ID>`.
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-5"></a>
-
-## 5. `mlflow doctor` — installation health check
-
-Reports the Python / MLflow / system versions, the configured tracking URI, the artifact backend, the registry status, and any known incompatibilities.
+### 4. Drive the CLI from the `cli` service
 
 ```bash
+# Installation health check
 docker compose run --rm cli mlflow doctor
-```
 
-Sample output:
-
-```text
-System information: Linux #1 SMP Tue ...
-Python version: 3.12.7
-MLflow version: 2.16.2
-MLflow module location: /usr/local/lib/python3.12/site-packages/mlflow/__init__.py
-Tracking URI: http://mlflow:5000
-Registry URI: http://mlflow:5000
-MLflow environment variables:
-  MLFLOW_TRACKING_URI: http://mlflow:5000
-MLflow dependencies:
-  Flask: 3.0.3
-  alembic: 1.13.2
-  click: 8.1.7
-  ...
-```
-
-To redact env vars before posting in a bug report:
-
-```bash
-docker compose run --rm cli mlflow doctor --mask-envs
-```
-
-> [!TIP]
-> `mlflow doctor` is the first thing to run when something feels off. 9 times out of 10 it surfaces the problem (wrong tracking URI, mismatched MLflow version on client vs server, missing optional dep…).
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-6"></a>
-
-## 6. `mlflow experiments` — create / rename / delete / restore / search / csv
-
-### 6.1 Create a new experiment
-
-```bash
-docker compose run --rm cli mlflow experiments create --experiment-name cli_experiment
-```
-
-Output: `Created experiment 'cli_experiment' with id <NEW_EXP_ID>`. Remember that id (or use the UI / `experiments search` below to find it).
-
-### 6.2 Search experiments — including deleted
-
-The `--view` flag accepts `active_only` (default), `deleted_only`, or `all`.
-
-```bash
+# Experiments
 docker compose run --rm cli mlflow experiments search --view all
-```
-
-Output (table):
-
-```text
-Experiment Id    Name                    Artifact Location                Lifecycle Stage
-0                Default                 mlflow-artifacts:/0              active
-1                experiment_cli_demo     mlflow-artifacts:/1              active
-2                cli_experiment          mlflow-artifacts:/2              active
-```
-
-### 6.3 Rename an experiment
-
-```bash
-docker compose run --rm cli mlflow experiments rename \
-  --experiment-id 2 --new-name test1
-```
-
-### 6.4 Delete + restore
-
-`delete` is a soft-delete: the experiment is hidden from the UI's "Active" tab but its data and runs are preserved. `restore` reverses it.
-
-```bash
+docker compose run --rm cli mlflow experiments create --experiment-name cli_experiment
+docker compose run --rm cli mlflow experiments rename --experiment-id 2 --new-name test1
 docker compose run --rm cli mlflow experiments delete  --experiment-id 2
 docker compose run --rm cli mlflow experiments restore --experiment-id 2
-```
-
-After delete, `experiments search --view active_only` won't list it; `experiments search --view all` will, with `Lifecycle Stage = deleted`.
-
-> [!IMPORTANT]
-> Permanent deletion is a separate operation. Use `MlflowClient().delete_experiment(...)` then a server-side `mlflow gc` to actually free the storage.
-
-### 6.5 Export an experiment to CSV
-
-```bash
 docker compose run --rm cli mlflow experiments csv \
   --experiment-id 1 --filename /artifacts/test.csv
-```
 
-(Adjust `/artifacts/...` to a path that's mounted in the `cli` container — e.g. `/artifacts` if you mount `./cli_artifact:/artifacts`.) The CSV has one row per run with all params and metrics — perfect for an Excel review or a quick `pandas.read_csv` analysis.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-7"></a>
-
-## 7. `mlflow runs` — list / describe / delete / restore
-
-### 7.1 List runs of an experiment
-
-```bash
+# Runs
 docker compose run --rm cli mlflow runs list --experiment-id 1 --view all
-```
+docker compose run --rm cli mlflow runs describe --run-id <RUN_ID>
+docker compose run --rm cli mlflow runs delete  --run-id <RUN_ID>
+docker compose run --rm cli mlflow runs restore --run-id <RUN_ID>
 
-Output:
-
-```text
-Run ID                                Name                      Status     ...
-8a4f...d1                             luxuriant-mole-512        FINISHED
-3b2e...c7                             dapper-otter-009          FINISHED
-```
-
-### 7.2 Describe a single run (full JSON dump)
-
-```bash
-docker compose run --rm cli mlflow runs describe --run-id 8a4fd1...
-```
-
-You get the run's `info`, `data.params`, `data.metrics`, `data.tags`, `inputs`, etc. as JSON. Pipe through `jq` to filter:
-
-```bash
-docker compose run --rm cli sh -c \
-  "mlflow runs describe --run-id 8a4fd1... | jq '.data.metrics'"
-```
-
-(Add `jq` to the `cli` image if you want this — `apt-get install -y jq` in the Dockerfile.)
-
-### 7.3 Soft-delete + restore
-
-```bash
-docker compose run --rm cli mlflow runs delete  --run-id 8a4fd1...
-docker compose run --rm cli mlflow runs restore --run-id 8a4fd1...
-```
-
-Same lifecycle model as experiments: deleted runs are hidden in the UI but still in the DB, and `runs list --view all` shows them.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-8"></a>
-
-## 8. `mlflow artifacts` — list / download / log-artifacts
-
-### 8.1 List a run's artifacts
-
-```bash
-docker compose run --rm cli mlflow artifacts list --run-id 8a4fd1...
-```
-
-Output:
-
-```text
-File path                       File size
-model/MLmodel                   542
-model/conda.yaml                184
-model/python_env.yaml            89
-model/requirements.txt           58
-model/model.pkl                 814
-```
-
-Drill into a sub-folder by passing `--artifact-path`:
-
-```bash
-docker compose run --rm cli mlflow artifacts list \
-  --run-id 8a4fd1... --artifact-path model
-```
-
-### 8.2 Download artifacts to a local folder
-
-```bash
-docker compose run --rm cli mlflow artifacts download \
-  --run-id 8a4fd1... --dst-path /artifacts/cli_artifact
-```
-
-The `cli` service mounts `./cli_artifact` from the host as `/artifacts/cli_artifact`, so after the command you'll find a full copy of the run's artifact directory on your host machine. Useful for sharing a model with a non-MLflow user, or for diffing two model versions side-by-side.
-
-### 8.3 Upload arbitrary artifacts to an existing run
-
-```bash
+# Artifacts
+docker compose run --rm cli mlflow artifacts list     --run-id <RUN_ID>
+docker compose run --rm cli mlflow artifacts download --run-id <RUN_ID> \
+  --artifact-path model --dst-path /artifacts
 docker compose run --rm cli mlflow artifacts log-artifacts \
-  --run-id 8a4fd1... \
-  --local-dir /artifacts/cli_artifact \
-  --artifact-path cli_artifact
+  --local-dir /artifacts/notes --run-id <RUN_ID>
 ```
 
-This goes the other way — pushing a local folder into the run under the sub-path `cli_artifact`. Handy when an external script produced reports that should live alongside the model in the same run.
+After `download` / `csv`, look on the host: the outputs land in `./cli_artifact/...` thanks to the bind mount.
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+### 5. Open a long-running shell inside the CLI sandbox
 
----
-
-<a id="section-9"></a>
-
-## 9. `mlflow db upgrade` — apply schema migrations
-
-Whenever you bump MLflow on the server (e.g. `2.13` → `2.16`), the underlying SQL schema may have changed. Migrations are **not** applied automatically; you must run:
+When you want to chain many commands without paying the container start-up over and over:
 
 ```bash
-docker compose run --rm cli mlflow db upgrade sqlite:///mlflow.db
+docker compose run --rm --entrypoint sh cli
+# inside:
+#   mlflow doctor
+#   mlflow experiments search --view all
+#   mlflow runs list --experiment-id 1 --view all
+#   mlflow artifacts download --run-id <RUN_ID> --artifact-path model --dst-path /artifacts
+#   exit
 ```
 
-…with the **same backend store URI the server uses**. In our setup the server uses `sqlite:////mlflow/database/mlflow.db`, so:
+### 6. Tear down
 
 ```bash
-docker compose run --rm \
-  -e MLFLOW_TRACKING_URI=http://mlflow:5000 \
-  -v mlflow-db:/mlflow/database \
-  cli mlflow db upgrade sqlite:////mlflow/database/mlflow.db
+docker compose down       # keep volumes (DB + artifacts survive)
+docker compose down -v    # wipe everything
 ```
 
-For PostgreSQL the URI looks like `postgresql://user:pass@host:5432/dbname`. Behind the scenes MLflow uses Alembic to apply pending revisions — same idiom as Django/Flask migrations.
+## What ends up on your host
 
-> [!IMPORTANT]
-> Always **back up the DB** (or a snapshot of the volume) before running `db upgrade` in production. Migrations are forward-only.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-10"></a>
-
-## 10. Tips: `MLFLOW_TRACKING_URI`, output formats, scripting
-
-- Most commands honour the `MLFLOW_TRACKING_URI` env var. Set it once in the shell (`export MLFLOW_TRACKING_URI=http://localhost:5000`) and skip the `--tracking-uri` flag.
-- `mlflow runs list` and `mlflow experiments search` accept `--output-format json` (or `csv`) for parsing in scripts. Example:
-
-  ```bash
-  docker compose run --rm cli sh -c \
-    "mlflow runs list --experiment-id 1 --view all --output-format json | jq '.[].info.run_id'"
-  ```
-
-- The CLI exits non-zero on errors → safe to chain with `&&` in shell scripts.
-- Help is always one flag away: `mlflow <subcommand> --help`. Try `mlflow models --help` (chap 25/26 will use it for serving).
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-11"></a>
-
-## 11. Tear down
-
-```bash
-docker compose down
-docker compose down -v        # also drops mlflow-db / mlflow-artifacts / shared volumes
-```
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-12"></a>
-
-## 12. Recap and next chapter
-
-The MLflow CLI mirrors most of the Python SDK and adds a few admin essentials:
-
-| Family | Useful commands |
+| Path / Volume | Contents |
 |---|---|
-| Diagnostics | `mlflow doctor [--mask-envs]` |
-| Experiments | `create`, `rename`, `delete`, `restore`, `search --view all`, `csv` |
-| Runs | `list --view all`, `describe`, `delete`, `restore` |
-| Artifacts | `list`, `download --dst-path`, `log-artifacts --local-dir --artifact-path` |
-| DB | `db upgrade <backend-store-uri>` |
+| `mlflow-db` (Docker volume) | SQLite metadata DB |
+| `mlflow-artifacts` (Docker volume) | Pickled models, signatures |
+| `./cli_artifact/` (host bind mount) | `mlflow artifacts download` outputs + `mlflow experiments csv` exports |
 
-Combine with `--output-format json` + `jq` to script anything the UI does.
+Inspect the named volumes with:
 
-This wraps up the **01 → 26b** recap series. The trainer side is fully covered. The next chapter (21) leaves the trainer and starts the **deployment** half of the course: serving the registered pyfunc through FastAPI and consuming it from a Streamlit app.
+```bash
+docker volume ls | grep recap
+docker volume inspect mlflow-artifacts
+```
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+## Recap (bash, one-shot)
 
----
+```bash
+cd chap26b-mlflow-step-by-step-recap-mlflow-cli-doctor-artifacts-experiments-runs
 
-<p align="center">
-  <strong>End of Chapter 26b — the MLflow CLI</strong><br/>
-  <a href="#top">↑ Back to the top</a>
-</p>
+docker compose up -d --build mlflow
+
+docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.4
+docker compose run --rm trainer --alpha 0.6 --l1_ratio 0.6
+
+docker compose run --rm cli mlflow doctor
+docker compose run --rm cli mlflow experiments search --view all
+docker compose run --rm cli mlflow runs list --experiment-id 1 --view all
+
+docker compose down
+```
+
+## Recap (Windows PowerShell)
+
+```powershell
+cd chap26b-mlflow-step-by-step-recap-mlflow-cli-doctor-artifacts-experiments-runs
+
+docker compose up -d --build mlflow
+
+docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.4
+docker compose run --rm trainer --alpha 0.6 --l1_ratio 0.6
+
+docker compose run --rm cli mlflow doctor
+docker compose run --rm cli mlflow experiments search --view all
+docker compose run --rm cli mlflow runs list --experiment-id 1 --view all
+
+docker compose down
+```
+
+## Troubleshooting
+
+<details>
+<summary><strong>Port 5000 already in use on Windows</strong></summary>
+
+CMD:
+
+```bat
+netstat -ano | findstr :5000
+tasklist | findstr 12345
+taskkill /PID 12345 /F
+```
+
+PowerShell:
+
+```powershell
+Get-NetTCPConnection -LocalPort 5000
+Stop-Process -Id 12345 -Force
+```
+
+</details>
+
+<details>
+<summary><strong>Docker Desktop frozen</strong></summary>
+
+Open **PowerShell as Administrator**:
+
+```powershell
+Get-Process *docker* -ErrorAction SilentlyContinue | Stop-Process -Force
+Stop-Service com.docker.service -Force -ErrorAction SilentlyContinue
+wsl --shutdown
+```
+
+Then:
+
+```powershell
+Start-Service com.docker.service
+Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+```
+
+</details>
+
+<details>
+<summary><strong>`mlflow doctor` shows the wrong tracking URI</strong></summary>
+
+The `cli` image bakes `MLFLOW_TRACKING_URI=http://mlflow:5000`. If `mlflow doctor` shows something else, check:
+
+1. `docker-compose.yml` -> `cli` service -> the `environment:` block.
+2. You launched via `docker compose run --rm cli ...` (the `cli` service inherits the network + env).
+3. The MLflow service is healthy: `docker compose ps` -> `mlflow-recap-26b ... healthy`.
+
+Override at runtime if needed:
+
+```bash
+docker compose run --rm -e MLFLOW_TRACKING_URI=http://other:5000 cli mlflow doctor
+```
+
+</details>
+
+<details>
+<summary><strong>`mlflow artifacts download` cannot find my output</strong></summary>
+
+The `cli` service mounts `./cli_artifact:/artifacts`. Always pass `--dst-path /artifacts/...` (inside the container) so the file lands in `./cli_artifact/...` on the host. If you `--dst-path /tmp/foo`, the file lives only inside the (`--rm`-removed) container and is lost the moment the command returns.
+
+</details>
+
+## Final wrap-up
+
+You've now closed the **complete recap series**: chap01 -> 26b. The trainer side is fully covered (basics, Docker plumbing, experiments, runs, artifacts, tags, autolog, signatures, pyfunc, evaluation, validation, registry, projects, CLI). The next major step of the course is **deployment**: serving the registered model through FastAPI and consuming it from a Streamlit frontend (chapters 21+ of the original course track).

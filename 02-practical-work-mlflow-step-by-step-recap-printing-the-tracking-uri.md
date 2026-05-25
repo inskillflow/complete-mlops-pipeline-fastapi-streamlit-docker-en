@@ -1,172 +1,96 @@
-﻿<a id="top"></a>
+﻿# chap02 - Step-by-step recap: print the tracking URI
 
-# Chapter 02 — Step-by-step recap: confirming the tracking URI with `get_tracking_uri()`
+The full lesson lives at [`../02-practical-work-mlflow-step-by-step-recap-printing-the-tracking-uri.md`](../02-practical-work-mlflow-step-by-step-recap-printing-the-tracking-uri.md).
 
-## Table of Contents
+> [!TIP]
+> **Objectif du chap02 — Savoir _où_ MLflow écrit, avant même de logger.**
+>
+> Tu vas :
+> 1. Reprendre exactement la pile de chap01 (un seul conteneur `mlflow`, bind mounts `./database` et `./mlruns`).
+> 2. Ajouter **une seule ligne** dans le script : `print("Tracking URI:", mlflow.get_tracking_uri())`.
+> 3. Lancer `docker compose exec mlflow python train.py` et **lire l'URI imprimée** dans la console.
+> 4. Comparer cette URI avec ce que tu vois sur disque (`./database/mlflow.db`, `./mlruns/0/...`) pour confirmer où vont les runs.
+>
+> À la fin, tu comprends que **MLflow choisit son backend en fonction de l'URI courante** (`file:///...` par défaut, `http://...` plus tard), ce qui est la base de toute la suite (chap04+ : passer cette URI via `MLFLOW_TRACKING_URI`).
 
-| # | Section |
-|---|---|
-| 1 | [Objective](#section-1) |
-| 2 | [The single line we add today](#section-2) |
-| 3 | [Project structure](#section-3) |
-| 4 | [The code](#section-4) |
-| 5 | [Run it, observe the output, tear down](#section-5) |
-| 6 | [Recap and next chapter](#section-6) |
+## What's new vs chap01
 
----
-
-<a id="section-1"></a>
-
-## 1. Objective
-
-Tiniest possible diff from Chapter 01: we **print** the URI MLflow is currently pointing at. This is the most useful one-liner you can sprinkle in any MLflow script — it instantly answers the question "**am I logging to the server I think I'm logging to?**".
-
-> [!IMPORTANT]
-> Most "my run isn't showing up in the UI!" problems come down to a wrong tracking URI. Print it once and the mystery dies.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-2"></a>
-
-## 2. The single line we add today
-
-Right after `mlflow.set_tracking_uri(...)`:
+A single line:
 
 ```python
-print("Tracking URI:", mlflow.get_tracking_uri())     # NEW
-```
-
-That's it. The whole chapter is built around **one extra line**.
-
-`mlflow.get_tracking_uri()` returns whatever was set most recently — either via `set_tracking_uri(...)` in code, or via the env var `MLFLOW_TRACKING_URI`, or the default (`file:./mlruns`).
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-3"></a>
-
-## 3. Project structure
-
-```text
-chap02-mlflow-step-by-step-recap-printing-the-tracking-uri/
-├── README.md
-├── docker-compose.yml
-├── mlflow/
-│   └── Dockerfile
-└── hello_mlflow.py     ← +1 line vs chap 01
-```
-
-Identical to chap 01 apart from `hello_mlflow.py`.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-4"></a>
-
-## 4. The code
-
-### 4.1 `hello_mlflow.py` — diff vs chap 01
-
-```python
-import mlflow
-
-mlflow.set_tracking_uri("http://localhost:5000")
-print("Tracking URI:", mlflow.get_tracking_uri())     # NEW
-
-mlflow.set_experiment("hello_mlflow")
-
-with mlflow.start_run(run_name="my_first_run"):
-    mlflow.log_param("learning_rate", 0.01)
-    mlflow.log_param("epochs", 5)
-    mlflow.log_metric("accuracy", 0.92)
-    mlflow.log_metric("loss", 0.18)
-
-print("Done. Open http://localhost:5000 to see your run.")
-```
-
-### 4.2 `docker-compose.yml` and `mlflow/Dockerfile`
-
-Identical to [Chapter 01](./01-practical-work-mlflow-step-by-step-recap-hello-mlflow-basics.md). No change.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-5"></a>
-
-## 5. Run it, observe the output, tear down
-
-### 5.1 Start the server
-
-```bash
-cd chap02-mlflow-step-by-step-recap-printing-the-tracking-uri
-docker compose up --build
-```
-
-### 5.2 Run the script from the host venv
-
-```bash
-python hello_mlflow.py
-```
-
-Output:
-
-```text
-Tracking URI: http://localhost:5000
-Done. Open http://localhost:5000 to see your run.
-```
-
-The first line confirms what you intended.
-
-### 5.3 Mini exercise — observe what happens **without** `set_tracking_uri`
-
-Comment out the `set_tracking_uri` line:
-
-```python
-# mlflow.set_tracking_uri("http://localhost:5000")
 print("Tracking URI:", mlflow.get_tracking_uri())
 ```
 
-Re-run:
-
-```text
-Tracking URI: file:///path/to/your/cwd/mlruns
-Done. Open http://localhost:5000 to see your run.
-```
-
-The URI now points at a **local folder** (`file:///...mlruns`). Your "run" was logged there, **not** in the dockerized server. This is exactly the silent failure mode you'll catch in two seconds with the `print` line.
-
-Restore the `set_tracking_uri` line and re-run — back to `http://localhost:5000`.
-
-### 5.4 Tear down
+## Run it (100% Docker, no Python on the host)
 
 ```bash
+# First, make sure you have read the Dockerfile and docker-compose.yml files
+# to understand how the mlflow server is set up and how it persists metadata
+# (SQLite) and artifacts on local folders.
+
+# 1. Create `database/` and `mlruns/` in the current directory.
+#    REQUIRED: bind mounts in docker-compose.yml expect them to exist.
+cd chap02-mlflow-step-by-step-recap-printing-the-tracking-uri
+mkdir database mlruns
+
+# 2. Start the mlflow server in detached mode.
+docker compose up -d --build
+# Check this URL: http://localhost:5000  (empty UI: only "Default" experiment)
+
+# python hello_mlflow.py
+# Will NOT work: mlflow may not be installed on the host, and the local
+# `mlflow/` folder also shadows the `mlflow` Python package on the host.
+# Run it INSIDE the mlflow container instead:
+
+docker compose exec -d mlflow python hello_mlflow.py
+# Expected stdout (visible via `docker compose logs mlflow`):
+#   Tracking URI: http://localhost:5000
+#   Done. Open http://localhost:5000 to see your run.
+
+# Refresh http://localhost:5000  -> experiment "hello_mlflow" appears with
+# a new run named "my_first_run".
+
+# 3. Stop the mlflow server.
 docker compose down
 ```
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+## What ends up on your host
 
----
+```
+chap02-mlflow-step-by-step-recap-printing-the-tracking-uri/
+├── database/mlflow.db
+└── mlruns/0/<run_id>/...
+```
 
-<a id="section-6"></a>
+## Tear down (full wipe)
 
-## 6. Recap and next chapter
+```bash
+docker compose down
+rm -rf database mlruns        # delete persisted DB + artifacts
+```
 
-- `mlflow.get_tracking_uri()` returns the **currently active** tracking URI.
-- Always print it once at script start. Three letters of code save hours of confusion.
-- Without `set_tracking_uri(...)` and without `MLFLOW_TRACKING_URI`, MLflow falls back to a local `mlruns/` folder — runs go nowhere visible.
 
-Next: **[Chapter 03](./03-practical-work-mlflow-step-by-step-recap-elasticnet-on-red-wine-quality.md)** — same Docker setup, but the script becomes a **real ML pipeline**: load the red-wine-quality CSV, train an `ElasticNet`, log params + metrics + model with `mlflow.sklearn.log_model`.
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+## Recap
 
----
+> Suppose that you are still located in the first project 
+> you need to execute docker compose down to stop the mlflow server 
+> Then you can navigate to the second project directory and repeat the same steps to start the mlflow server, run the hello_mlflow.py script, and then stop the mlflow server:
 
-<p align="center">
-  <strong>End of Chapter 02 — Confirming the tracking URI</strong><br/>
-  <a href="#top">↑ Back to the top</a>
-</p>
+
+```bash
+docker compose down
+cd ../chap02-mlflow-step-by-step-recap-printing-the-tracking-uri
+mkdir database mlruns
+docker compose up -d --build  
+docker compose exec -d mlflow python hello_mlflow.py # This command will not show you the print commands since it's running in the background (detached mode)
+docker compose exec mlflow python hello_mlflow.py  # This command will show you the 2 prints in the beging and end of execution of your .py file
+# Check your terminal logs
+# Check the http://localhost:5000
+docker-compose down 
+```
+
+
+
+
+

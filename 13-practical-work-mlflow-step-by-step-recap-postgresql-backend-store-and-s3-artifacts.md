@@ -1,433 +1,293 @@
-﻿<a id="top"></a>
+﻿# chap13 - Step-by-step recap: PostgreSQL backend store and S3 artifacts (production topology)
 
-# Chapter 13 — Step-by-step recap: replacing SQLite with **PostgreSQL** (backend store) — and a look at S3 for production
+The full lesson lives at [../13-practical-work-mlflow-step-by-step-recap-postgresql-backend-store-and-s3-artifacts.md](../13-practical-work-mlflow-step-by-step-recap-postgresql-backend-store-and-s3-artifacts.md).
 
-## Table of Contents
+> **In one line.** This chapter is about how to **replace SQLite with PostgreSQL for the backend store, and outline how to plug an S3 (or MinIO) bucket as the artifact store -- the canonical production deployment of MLflow**.
 
-| # | Section |
-|---|---|
-| 1 | [Objective](#section-1) |
-| 2 | [What we change vs all previous chapters](#section-2) |
-| 3 | [The three MLflow storage layers](#section-3) |
-| 4 | [SQLite vs PostgreSQL — when to upgrade](#section-4) |
-| 5 | [Project structure](#section-5) |
-| 6 | [The code](#section-6) |
-| 7 | [Run it, verify PostgreSQL is actually used](#section-7) |
-| 8 | [Production variant: PostgreSQL + S3](#section-8) |
-| 9 | [Tear down](#section-9) |
-| 10 | [Recap and next chapter](#section-10) |
 
----
-
-<a id="section-1"></a>
-
-## 1. Objective
-
-All previous chapters (01 -> l) used **SQLite** as the MLflow backend store. That's fine for learning but SQLite breaks under concurrent writes and doesn't survive in multi-container or multi-user setups.
-
-Today we:
-
-1. Add a **`postgres`** service to the Docker Compose stack.
-2. Tell the **`mlflow`** service to use `postgresql://...` as its `--backend-store-uri`.
-3. Confirm the runs are actually stored in Postgres (not in a local file).
-4. Explain how to swap the local artifact volume for **S3** when deploying to real infrastructure.
-
-The `train.py` doesn't change at all — the switch is entirely in the compose file.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-2"></a>
-
-## 2. What we change vs all previous chapters
-
-| File | Change |
-|---|---|
-| `docker-compose.yml` | + new `postgres` service (image `postgres:16-alpine`). MLflow's `CMD` now points to `postgresql://...`. MLflow image also needs `psycopg2-binary`. |
-| `mlflow/Dockerfile` | Add `psycopg2-binary==2.9.10` to the `pip install` line. |
-| `trainer/train.py` | **Unchanged**. Still reads `MLFLOW_TRACKING_URI` from env. |
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-3"></a>
-
-## 3. The three MLflow storage layers
-
-MLflow stores information in three distinct places:
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                        MLflow server                           │
-│                                                                │
-│  ┌──────────────────────┐    ┌──────────────────────────────┐ │
-│  │  Backend store       │    │  Artifact store              │ │
-│  │  (metadata)          │    │  (binary files)              │ │
-│  │                      │    │                              │ │
-│  │  • Experiment names  │    │  • model.pkl                 │ │
-│  │  • Run IDs, names    │    │  • train.csv, test.csv       │ │
-│  │  • Parameters        │    │  • plots (.png)              │ │
-│  │  • Metrics           │    │  • signature.json            │ │
-│  │  • Tags              │    │  • input_example.json        │ │
-│  │                      │    │                              │ │
-│  │  Dev:   SQLite       │    │  Dev:   named volume         │ │
-│  │  Prod:  PostgreSQL   │    │  Prod:  S3 / GCS / ADLS      │ │
-│  └──────────────────────┘    └──────────────────────────────┘ │
-└────────────────────────────────────────────────────────────────┘
-```
-
-They are **independent**: you can mix any backend store with any artifact store.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-4"></a>
-
-## 4. SQLite vs PostgreSQL — when to upgrade
-
-| Criterion | SQLite | PostgreSQL |
-|---|---|---|
-| Setup | Zero deps — just a file | Needs a DB server |
-| Concurrent writes | Fails under load (file-level lock) | MVCC — handles many writers |
-| Multi-container | Risky (shared file over volume) | First-class — TCP socket |
-| Multi-user | Not designed for it | Yes |
-| Migrations / upgrades | Manual | Handled by MLflow (`mlflow db upgrade`) |
-| Production | **No** | **Yes** |
-| Chapter 01 → 12 | ✓ (perfect for learning) | — |
-| **This chapter** | — | ✓ |
+## Before you start — Create the host folder!
 
 > [!IMPORTANT]
-> Run `mlflow db upgrade --url <backend-store-uri>` whenever you upgrade MLflow's version on an existing PostgreSQL database. It applies schema migrations automatically. Never skip this step — a version mismatch will crash the server at startup.
+> **You MUST create the local folder `mlruns/` BEFORE the first `docker compose up`.**
+>
+> This chapter uses **Postgres** as the backend store, so there is NO `./database/` bind mount (Postgres data lives in a named Docker volume `postgres-data`). But `./mlruns/` and `.` are still bind-mounted into the `mlflow` container.
+>
+> ### Create it now
+> ```bash
+> mkdir mlruns       # bash / Git Bash / macOS / Linux / WSL
+> ```
+> ```powershell
+> New-Item -ItemType Directory mlruns -Force | Out-Null   # PowerShell
+> ```
+>
+> ### What ends up in those folders — and what `working_dir` is for
+>
+> | Host (your laptop, this chapter folder) | Container path (`mlflow` service)   | What lives there                                |
+> | --------------------------------------- | ----------------------------------- | ----------------------------------------------- |
+> | (none — Postgres replaces SQLite)       | `postgres-data` (named volume)      | Postgres metadata: experiments, runs, metrics   |
+> | `./mlruns/`                             | `/mlflow/mlruns/`                   | Artifacts: models, plots, metric files          |
+> | `.` (the entire chapter folder)         | `/work/`  ←  this is `working_dir:` | The full project tree: `trainer/`, `data/`, ... |
+>
+> The `.:/work` mount plus `working_dir: /work` is what makes **Docker Desktop → Containers → `mlflow-recap-13` → Exec → `ls`** show all your project files. `working_dir:` is a Compose directive that sets the default cwd for `RUN`, `CMD` and any `docker compose exec`.
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+## Two ways to launch the training
 
----
+> [!NOTE]
+> **Way A — canonical (one-shot `trainer` container, recommended for the lesson):**
+> ```bash
+> docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> **Way B — via `docker compose exec` inside the running `mlflow` container (Docker Desktop friendly):**
+> ```bash
+> docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> Both run the same `train.py` and write to Postgres (NOT to a local SQLite file). `MLFLOW_TRACKING_URI` is set on the `trainer` service in `docker-compose.yml`, so both Way A and Way B "just work" and the runs appear in the MLflow UI. If a run does NOT appear, force the URI with: `docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py ...`
 
-<a id="section-5"></a>
+## What is new vs chap12
 
-## 5. Project structure
+- Third service: `postgres` (image `postgres:16-alpine`) with `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` env vars
+- `mlflow/Dockerfile` adds `psycopg2-binary`; the `CMD` uses `--backend-store-uri postgresql://mlflowuser:...@postgres:5432/mlflowdb`
+- `depends_on: postgres: condition: service_healthy` -> MLflow only starts once the DB accepts connections
+- Artifacts can stay on a local named volume OR move to S3/MinIO with `--default-artifact-root s3://...` + AWS creds env vars
+
+This chapter adds extra service(s) on top of the standard mlflow + trainer pair: **postgres**. See the lesson .md for the rationale.
+
+
+## Project structure
+
+The project follows the canonical recap layout (see [section 8 of the root README](../README.md#section-8) for the full reference):
 
 ```text
-chap13-mlflow-step-by-step-recap-postgresql-backend-store-and-s3-artifacts/
-├── README.md
-├── docker-compose.yml          ← adds postgres service, changes mlflow CMD
-├── data/
-│   └── red-wine-quality.csv
-├── mlflow/
-│   └── Dockerfile              ← adds psycopg2-binary
-└── trainer/
-    ├── Dockerfile
-    ├── requirements.txt
-    └── train.py                ← unchanged from chap 12
+chap13-.../
++- README.md                 <- this file
++- docker-compose.yml        <- mlflow + trainer + postgres
++- mlflow/
+|  +- Dockerfile             <- mlflow tracking server image
++- data/
+|  +- red-wine-quality.csv
++- trainer/                  <- training service
+   +- Dockerfile
+   +- requirements.txt
+   +- train.py
 ```
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+## Run it (100% Docker, no Python on the host)
 
----
+This is the **canonical run sequence** for the recap series. It is the same for every chapter from 04 onward; only the trainer arguments change.
 
-<a id="section-6"></a>
-
-## 6. The code
-
-### 6.1 `mlflow/Dockerfile`
-
-```dockerfile
-FROM python:3.12-slim
-WORKDIR /mlflow
-RUN pip install --no-cache-dir \
-        mlflow==2.16.2 \
-        psycopg2-binary==2.9.10
-EXPOSE 5000
-CMD ["mlflow", "server", \
-     "--backend-store-uri", "postgresql://mlflowuser:mlflowpassword@postgres:5432/mlflowdb", \
-     "--default-artifact-root", "/mlflow/mlruns", \
-     "--host", "0.0.0.0", "--port", "5000"]
-```
-
-The only difference from chap 01→12 Dockerfiles: `psycopg2-binary` is added and the `CMD` uses a `postgresql://` URI.
-
-### 6.2 `docker-compose.yml`
-
-```yaml
-services:
-
-  # ─── NEW: PostgreSQL backend store ────────────────────────────────────────
-  postgres:
-    image: postgres:16-alpine
-    container_name: postgres-recap-13
-    environment:
-      POSTGRES_DB:       mlflowdb
-      POSTGRES_USER:     mlflowuser
-      POSTGRES_PASSWORD: mlflowpassword
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    networks:
-      - recap-net
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U mlflowuser -d mlflowdb"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  # ─── MLflow server (now talking to Postgres) ──────────────────────────────
-  mlflow:
-    build:
-      context: ./mlflow
-    image: mlops/mlflow-pg-recap:latest
-    container_name: mlflow-recap-13
-    ports:
-      - "5000:5000"
-    volumes:
-      - mlflow-artifacts:/mlflow/mlruns
-    networks:
-      - recap-net
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c",
-             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000').status==200 else 1)"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ─── Trainer (unchanged) ──────────────────────────────────────────────────
-  trainer:
-    build:
-      context: ./trainer
-    image: mlops/trainer-recap:latest
-    container_name: trainer-recap-13
-    environment:
-      MLFLOW_TRACKING_URI: "http://mlflow:5000"
-    volumes:
-      - ./data:/code/data
-    networks:
-      - recap-net
-    depends_on:
-      mlflow:
-        condition: service_healthy
-
-volumes:
-  postgres-data:
-  mlflow-artifacts:
-
-networks:
-  recap-net:
-    driver: bridge
-```
-
-### 6.3 `trainer/train.py` — unchanged from chap 12
-
-Use any recent `train.py` from 07→12. The trainer talks to `http://mlflow:5000`; it has no idea the backend store has changed.
-
-### 6.4 `trainer/Dockerfile` and `trainer/requirements.txt` — unchanged
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-7"></a>
-
-## 7. Run it, verify PostgreSQL is actually used
+### 1. Move into the chapter
 
 ```bash
-cd chap13-mlflow-step-by-step-recap-postgresql-backend-store-and-s3-artifacts
-docker compose up -d --build
+cd chap13-mlflow-step-by-step-recap...
+```
+
+### 2. Build everything and start the MLflow server in the background
+
+```bash
+docker compose up -d --build mlflow postgres
+```
+
+- `-d` runs the server detached so this terminal stays free for the trainer.
+- `--build` forces a rebuild if any `Dockerfile` or `requirements.txt` changed.
+
+Verify with:
+
+```bash
+docker compose ps
+# mlflow-recap-13    Up X seconds (healthy)
+```
+
+Open [http://localhost:5000](http://localhost:5000). The UI is empty for now (only `Default`) unless you have persistent volumes from a previous chapter.
+
+### 3. Run the trainer (with CLI args)
+
+```bash
 docker compose run --rm trainer --alpha 0.5 --l1_ratio 0.5
 ```
 
-Open [http://localhost:5000](http://localhost:5000) → experiment `experiment_autolog` (or whatever experiment your `train.py` targets) → 1 run logged.
+### 4. Refresh the MLflow UI
 
-Now confirm the data is in Postgres (not in any SQLite file):
+Open / refresh [http://localhost:5000](http://localhost:5000). Expected:
 
-```bash
-docker compose exec postgres psql -U mlflowuser -d mlflowdb -c "\dt"
-```
+- Experiment: `experiment_pg`
+- 1 run; UI on [http://localhost:5000](http://localhost:5000) is identical to chap12 but the data now lives in PostgreSQL.
 
-Expected output:
+> **Chapter quirk.** Use `docker compose exec postgres psql -U mlflowuser -d mlflowdb -c "\dt"` to confirm MLflow's schema was created (you should see `experiments`, `runs`, `metrics`, `params`, ...). If the tables are missing, `mlflow db upgrade postgresql://...` is the fix.
 
-```text
-                   List of relations
- Schema |            Name            | Type  |   Owner
---------+----------------------------+-------+------------
- public | alembic_version            | table | mlflowuser
- public | experiment_tags            | table | mlflowuser
- public | experiments                | table | mlflowuser
- public | input_tags                 | table | mlflowuser
- public | inputs                     | table | mlflowuser
- public | latest_metrics             | table | mlflowuser
- public | metrics                    | table | mlflowuser
- public | model_version_tags         | table | mlflowuser
- public | model_versions             | table | mlflowuser
- public | params                     | table | mlflowuser
- public | registered_model_tags      | table | mlflowuser
- public | registered_models          | table | mlflowuser
- public | run_tags                   | table | mlflowuser
- public | runs                       | table | mlflowuser
- public | tags                       | table | mlflowuser
-```
-
-These are MLflow's own tables. Query the runs directly:
+### 5. Tear down
 
 ```bash
-docker compose exec postgres psql -U mlflowuser -d mlflowdb \
-  -c "SELECT run_uuid, name, status, lifecycle_stage FROM runs ORDER BY start_time DESC LIMIT 5;"
+docker compose down       # keep volumes (DB + artifacts survive)
+docker compose down -v    # wipe everything (DB + artifacts + this chapter's named volumes)
 ```
 
-> [!TIP]
-> You can use any Postgres GUI (pgAdmin, TablePlus, DBeaver…) by connecting to `localhost:5432` with `mlflowuser` / `mlflowpassword` / `mlflowdb`. No port is published by default — add `ports: ["5432:5432"]` under the `postgres` service if you want external access.
+## What ends up on your host
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+This chapter uses **named Docker volumes** rather than host-side bind mounts for the MLflow data:
 
----
+| Volume | Contents |
+|---|---|
+| `mlflow-db` *(unused -- DB lives in `postgres-data` now)* | SQLite metadata DB (experiments, runs, registered models) *(unused, see `postgres-data`)* |
+| `mlflow-artifacts` | Pickled models, signatures, plots, CSVs |
+| `postgres-data` | PostgreSQL data directory |
 
-<a id="section-8"></a>
-
-## 8. Production variant: PostgreSQL + S3
-
-When you move to real infrastructure, you'll typically keep PostgreSQL as the backend store and replace the local Docker volume with **AWS S3** for artifacts. The two command-line recipes:
-
-### 8.1 SQLite (learning, local only)
+Inspect them with:
 
 ```bash
-mlflow server \
-  --backend-store-uri  sqlite:///mlflow.db \
-  --default-artifact-root ./mlruns \
-  --host 127.0.0.1 \
-  --port 5000
+docker volume ls | grep recap
+docker volume inspect <volume_name>
 ```
 
-### 8.2 PostgreSQL + S3 (production)
+These volumes survive `docker compose down`. Only `docker compose down -v` wipes them.
+
+## Recap (bash, one-shot)
 
 ```bash
-mlflow server \
-  --backend-store-uri  postgresql://user:password@postgres:5432/mlflowdb \
-  --default-artifact-root  s3://my-mlflow-bucket/artifacts \
-  --host 0.0.0.0 \
-  --port 5000 \
-  --no-serve-artifacts
+cd chap13-mlflow-step-by-step-recap...
+
+docker compose up -d --build mlflow postgres
+
+docker compose run --rm trainer --alpha 0.5 --l1_ratio 0.5
+
+# Open http://localhost:5000 and inspect the runs in experiment 'experiment_pg'.
+
+docker compose down
 ```
 
-`--no-serve-artifacts` tells MLflow not to proxy artifact downloads — the trainer and any client that needs the model fetches directly from S3 using their own AWS credentials. MLflow only stores the URI pointer in Postgres.
+## Recap (Windows PowerShell)
 
-### 8.3 Docker Compose snippet for the S3 variant
+```powershell
+cd chap13-mlflow-step-by-step-recap...
 
-Add these environment variables to the `mlflow` service:
+docker compose up -d --build mlflow postgres
 
-```yaml
-mlflow:
-  environment:
-    AWS_ACCESS_KEY_ID:     "${AWS_ACCESS_KEY_ID}"
-    AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
-    AWS_DEFAULT_REGION:    "us-east-1"
-  command:
-    - mlflow
-    - server
-    - --backend-store-uri
-    - postgresql://mlflowuser:mlflowpassword@postgres:5432/mlflowdb
-    - --default-artifact-root
-    - s3://my-mlflow-bucket/artifacts
-    - --host
-    - "0.0.0.0"
-    - --port
-    - "5000"
-    - --no-serve-artifacts
+docker compose run --rm trainer --alpha 0.5 --l1_ratio 0.5
+
+# Open http://localhost:5000 and inspect the runs in experiment 'experiment_pg'.
+
+docker compose down
 ```
 
-And add the same AWS env vars to the `trainer` service so it can upload artifacts to S3:
+## Enter the trainer container manually (debugging)
 
-```yaml
-trainer:
-  environment:
-    MLFLOW_TRACKING_URI:   "http://mlflow:5000"
-    AWS_ACCESS_KEY_ID:     "${AWS_ACCESS_KEY_ID}"
-    AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
-    AWS_DEFAULT_REGION:    "us-east-1"
-```
-
-Put the real keys in a `.env` file at the compose project root (never hard-code them). Docker Compose picks it up automatically:
+Sometimes you want a shell inside the trainer to inspect the filesystem, the env, or to step through the script line by line:
 
 ```bash
-# .env  (DO NOT commit this file)
-AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+docker compose run --rm --entrypoint bash trainer
+# inside:
+#   cat train.py
+#   ls /code/data
+#   env | grep MLFLOW
+#   python train.py --alpha 0.5 --l1_ratio 0.5
+#   exit
 ```
 
-### 8.4 IAM policy for the S3 bucket
+The `--entrypoint bash` flag overrides the image's `ENTRYPOINT ["python", "train.py"]` and drops you into a shell instead.
 
-The IAM user (or role) that runs MLflow needs at minimum:
+## Troubleshooting
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:ListBucket",
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject"
-      ],
-      "Resource": [
-        "arn:aws:s3:::my-mlflow-bucket",
-        "arn:aws:s3:::my-mlflow-bucket/*"
-      ]
-    }
-  ]
-}
+<details>
+<summary><strong>Port 5000 already in use on Windows</strong></summary>
+
+The MLflow server publishes `5000:5000`. If something else is already on port 5000 the container fails to start.
+
+CMD:
+
+```bat
+netstat -ano | findstr :5000
+:: Last column is the PID. Then:
+tasklist | findstr 12345
+taskkill /PID 12345 /F
 ```
 
-### 8.5 Summary table
+PowerShell:
 
-| Config | Backend store | Artifact store | Concurrency | Use for |
-|---|---|---|---|---|
-| SQLite + local dir | `sqlite:///mlflow.db` | `./mlruns` | Single user | Local dev |
-| **PostgreSQL + local volume** | `postgresql://...` | named Docker volume | Multi-container | **This chapter** |
-| PostgreSQL + S3 | `postgresql://...` | `s3://bucket/...` | Multi-user / cloud | Production |
+```powershell
+Get-NetTCPConnection -LocalPort 5000
+Stop-Process -Id 12345 -Force
+```
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+Port 5000 is the most common collision (Flask dev servers, AirPlay on macOS, `Hyper-V`, `IIS`, `netbios`, a previous MLflow chapter you forgot to `docker compose down`).
 
----
+</details>
 
-<a id="section-9"></a>
+<details>
+<summary><strong>Docker Desktop frozen / containers stuck in `Created`</strong></summary>
 
-## 9. Tear down
+Open **PowerShell as Administrator**:
+
+```powershell
+# 1. Stop Docker Desktop processes
+Get-Process *docker* -ErrorAction SilentlyContinue | Stop-Process -Force
+
+# 2. Stop the Docker service
+Stop-Service com.docker.service -Force -ErrorAction SilentlyContinue
+
+# 3. Force-stop the WSL backend
+wsl --shutdown
+```
+
+Wait 10-15 seconds, then:
+
+```powershell
+Start-Service com.docker.service
+Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+```
+
+If still frozen:
+
+```powershell
+taskkill /F /IM "Docker Desktop.exe"
+taskkill /F /IM "com.docker.backend.exe"
+taskkill /F /IM "com.docker.service.exe"
+taskkill /F /IM "dockerd.exe"
+wsl --shutdown
+```
+
+Then restart Docker Desktop from the Start menu.
+
+</details>
+
+<details>
+<summary><strong>Trainer says `Tracking URI: file:///code/mlruns`</strong></summary>
+
+That means the trainer did NOT see `MLFLOW_TRACKING_URI`. Three places to check:
+
+1. `docker-compose.yml` -> trainer -> `environment: MLFLOW_TRACKING_URI:` is present.
+2. You launched via `docker compose run --rm trainer ...` (not `docker run` directly).
+3. The MLflow service is healthy: `docker compose ps` -> `mlflow-recap-13 ... healthy`.
+
+Override at runtime if needed:
 
 ```bash
-docker compose down          # keep postgres-data + mlflow-artifacts
-docker compose down -v       # wipe everything (all data gone!)
+docker compose run --rm -e MLFLOW_TRACKING_URI=http://mlflow:5000 trainer --alpha 0.4 --l1_ratio 0.4
 ```
 
-> [!WARNING]
-> `docker compose down -v` deletes the `postgres-data` volume — all runs, experiments and registered models stored in Postgres are permanently lost.
+</details>
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+<details>
+<summary><strong>Trainer fails immediately with `Image not found` / `manifest unknown`</strong></summary>
 
----
+You forgot `--build` or the trainer image is stale.
 
-<a id="section-10"></a>
+```bash
+docker compose down
+docker compose up -d --build mlflow
+docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.4
+```
 
-## 10. Recap and next chapter
+If `--build` itself fails, prune and retry:
 
-| Layer | This chapter | Previous chapters |
-|---|---|---|
-| Backend store | **PostgreSQL** (production-grade) | SQLite (learning) |
-| Artifact store | Named Docker volume | Named Docker volume |
-| Trainer code | Unchanged | Unchanged |
-| Verification | `psql` direct query | UI only |
+```bash
+docker compose down -v
+docker builder prune -af
+docker compose up -d --build mlflow
+```
 
-Next: **[Chapter 14](./14-practical-work-mlflow-step-by-step-recap-model-signature-manual-and-infer-signature.md)** — add a **model signature** so MLflow knows the exact data types and shapes the model expects. Two approaches: **manual** (`ModelSignature`, `Schema`, `ColSpec`) and **automatic** (`infer_signature`).
+</details>
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+## Next chapter
 
----
-
-<p align="center">
-  <strong>End of Chapter 13 — PostgreSQL backend store + S3 for production</strong><br/>
-  <a href="#top">↑ Back to the top</a>
-</p>
+**Next**: [chap14](../14-practical-work-mlflow-step-by-step-recap-model-signature-manual-and-infer-signature.md) -- attach a **model signature** so MLflow knows the exact data types and shapes your model expects. Two approaches: manual (`ModelSignature` + `Schema` + `ColSpec`) and automatic (`infer_signature`).

@@ -1,335 +1,563 @@
-﻿<a id="top"></a>
+﻿# chap03 - Step-by-step recap: first ElasticNet pipeline on red-wine-quality
 
-# Chapter 03 — Step-by-step recap: a first ElasticNet pipeline on red-wine-quality
+The full lesson lives at [`../03-practical-work-mlflow-step-by-step-recap-elasticnet-on-red-wine-quality.md`](../03-practical-work-mlflow-step-by-step-recap-elasticnet-on-red-wine-quality.md).
 
-## Table of Contents
+> [!TIP]
+> **Objectif du chap03 — Premier vrai pipeline ML tracé dans MLflow.**
+>
+> Tu vas :
+> 1. Reprendre la même pile à un seul service `mlflow` qu'aux chap01/02 (bind mounts `./database`, `./mlruns`, `./data`).
+> 2. Entraîner un modèle **ElasticNet** sur le dataset `red-wine-quality.csv` en passant `--alpha` et `--l1_ratio` en CLI.
+> 3. Logger **paramètres**, **métriques** (`rmse`, `mae`, `r2`) et **modèle** (`mlflow.sklearn.log_model`) dans MLflow.
+> 4. Lancer **trois runs successifs** avec des hyperparamètres différents (`0.1/0.1`, `0.5/0.5`, `0.9/0.1`) et les comparer dans l'UI (`http://localhost:5000`).
+>
+> À la fin, tu sais lancer le _même_ script avec des arguments différents, comparer les runs côte à côte dans MLflow, et identifier le meilleur jeu d'hyperparamètres. C'est le **squelette de code** que tous les chapitres suivants vont enrichir (multi-services, `log_artifacts`, signatures, registry, etc.).
 
-| # | Section |
-|---|---|
-| 1 | [Objective](#section-1) |
-| 2 | [What we add today vs chap 02](#section-2) |
-| 3 | [Prerequisite](#section-3) |
-| 4 | [The dataset](#section-4) |
-| 5 | [Project structure](#section-5) |
-| 6 | [The code](#section-6) |
-| 7 | [Run it, see the run + the model in the UI](#section-7) |
-| 8 | [Mini exercise — a tiny grid search](#section-8) |
-| 9 | [Tear down](#section-9) |
-| 10 | [Recap and next chapter](#section-10) |
 
----
+This lab shows how to run several MLflow experiments with different hyperparameters.
 
-<a id="section-1"></a>
+You will train the same ElasticNet model three times, but each run will use different values of:
 
-## 1. Objective
+```text
+alpha
+l1_ratio
+````
 
-Time to graduate from the fake `accuracy = 0.92` of chapters 01 and 02. Today we run a **real machine-learning pipeline**:
+The goal is to compare the results in the MLflow UI.
 
-- Read a CSV (`red-wine-quality.csv`).
-- Split into train / test.
-- Train a scikit-learn `ElasticNet`.
-- Compute three regression metrics (`rmse`, `mae`, `r2`).
-- Log the **hyperparameters**, the **metrics**, **and the trained model** to MLflow with `mlflow.sklearn.log_model(...)`.
 
-That's the same shape every later chapter will keep.
+## What's new vs chap02 - MLflow ElasticNet on Red Wine Quality with Docker
 
-> [!IMPORTANT]
-> Today's script intentionally calls `mlflow.set_tracking_uri("http://localhost:5000")` first. **Forget this line and nothing lands in the dockerized UI** — you'd find your runs in a local `./mlruns/` folder instead. We saw this exact failure mode in [Chapter 02](./02-practical-work-mlflow-step-by-step-recap-printing-the-tracking-uri.md), section 5.3.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
+- A real ML pipeline: `pd.read_csv` -> `train_test_split` -> `ElasticNet.fit` -> compute `rmse / mae / r2`
+- `mlflow.sklearn.log_model(lr, "mymodel")` to persist the trained model
 
 ---
 
-<a id="section-2"></a>
-
-## 2. What we add today vs chap 02
-
-Three new things on top of [chap 02](./02-practical-work-mlflow-step-by-step-recap-printing-the-tracking-uri.md):
-
-| New | Why |
-|---|---|
-| `argparse` | Read `--alpha` and `--l1_ratio` from the command line so we can do many runs cheaply. |
-| `pandas` + `scikit-learn` (`ElasticNet`, `train_test_split`, `mean_squared_error`, …) | Real dataset, real model, real metrics. |
-| `mlflow.sklearn.log_model(lr, "mymodel")` | Persist the **trained model** (not just numbers) as an artifact attached to the run. |
-
-Same MLflow control flow you already know: `set_tracking_uri` → `set_experiment` → `start_run` → log the params, metrics, and model.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-3"></a>
-
-## 3. Prerequisite
-
-1. **Docker Desktop** (cf. [chapter 06 §1-3](./06-practical-work-2-installing-docker-desktop-and-running-mlflow-fastapi-streamlit-with-docker-compose.md) if needed).
-2. **Host venv** with these packages — `mlflow==2.16.2`, `scikit-learn==1.5.2`, `pandas==2.2.3`, `numpy==2.1.1`. A `requirements.txt` is shipped with the project for convenience.
+# 1. Clone the project
 
 ```bash
-# Linux / macOS
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+git clone https://github.com/inskillflow/mlops-beginner-level-01-en.git
 ```
+
+Then enter the project folders in order:
+
+```bash
+cd mlops-beginner-level-01-en/chap01-mlflow-step-by-step-recap-hello-mlflow-basics
+# done
+
+cd ../chap02-mlflow-step-by-step-recap-printing-the-tracking-uri
+# done
+
+cd ../chap03-mlflow-step-by-step-recap-elasticnet-on-red-wine-quality
+# start project #3
+```
+
+---
+
+# 2. Stop any running containers first
+
+Before starting this lab, make sure that no other MLflow container is already running on port `5000`.
+
+## Method 1 — Stop containers from another project
+
+Go to the other project folder:
+
+```bash
+cd other-project
+docker compose down
+```
+
+This stops and removes the containers created by that project.
+
+---
+
+## Method 2 — Use Docker Desktop
+
+You can also open **Docker Desktop** and manually:
+
+```text
+1. Go to Containers
+2. Find the running container
+3. Stop it
+4. Delete it if necessary
+```
+
+This is useful if you do not remember which folder started the container.
+
+---
+
+# 3. Start project #3
+
+You should now be inside this folder:
+
+```bash
+chap03-mlflow-step-by-step-recap-elasticnet-on-red-wine-quality
+```
+
+Create the required folders:
+
+```bash
+mkdir -p database mlruns
+```
+
+Or On Windows PowerShell:
 
 ```powershell
-# Windows PowerShell
-python -m venv .venv ; .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+New-Item -ItemType Directory -Force database, mlruns
 ```
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-4"></a>
-
-## 4. The dataset
-
-We use the **UCI Red Wine Quality** dataset — 1 599 rows, 11 physico-chemical features, target `quality` (integer 3 → 8).
-
-The CSV is shipped inside this chapter's project at `data/red-wine-quality.csv`, comma-separated, with this header:
-
-```text
-"fixed acidity","volatile acidity","citric acid","residual sugar","chlorides","free sulfur dioxide","total sulfur dioxide","density","pH","sulphates","alcohol","quality"
-7.4,0.7,0,1.9,0.076,11,34,0.9978,3.51,0.56,9.4,5
-7.8,0.88,0,2.6,0.098,25,67,0.9968,3.2,0.68,9.8,5
-...
-```
-
-> [!NOTE]
-> The UCI version of this dataset ships with `;` as separator. The bundled copy has been converted to `,` so that the simple `pd.read_csv("data/red-wine-quality.csv")` call works without any extra options. Same numbers, friendlier format.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-5"></a>
-
-## 5. Project structure
-
-```text
-chap03-mlflow-step-by-step-recap-elasticnet-on-red-wine-quality/
-├── README.md
-├── requirements.txt
-├── docker-compose.yml
-├── mlflow/
-│   └── Dockerfile
-├── data/
-│   └── red-wine-quality.csv
-└── train.py
-```
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-6"></a>
-
-## 6. The code
-
-### 6.1 `requirements.txt` (host venv)
-
-```text
-mlflow==2.16.2
-scikit-learn==1.5.2
-pandas==2.2.3
-numpy==2.1.1
-```
-
-### 6.2 `mlflow/Dockerfile` and `docker-compose.yml`
-
-Identical to chapters 01 / 02. Same single-service MLflow server on port 5000 with two persistent volumes.
-
-### 6.3 `train.py` — the real ML pipeline
-
-```python
-import argparse
-import logging
-import warnings
-
-import mlflow
-import mlflow.sklearn
-import numpy as np
-import pandas as pd
-from sklearn.linear_model import ElasticNet
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import train_test_split
-
-logging.basicConfig(level=logging.WARN)
-logger = logging.getLogger(__name__)
-
-# Read CLI arguments
-parser = argparse.ArgumentParser()
-parser.add_argument("--alpha", type=float, required=False, default=0.7)
-parser.add_argument("--l1_ratio", type=float, required=False, default=0.7)
-args = parser.parse_args()
+Or create the 2 folders manually (database and mlruns)
 
 
-# Evaluation function
-def eval_metrics(actual, pred):
-    rmse = np.sqrt(mean_squared_error(actual, pred))
-    mae = mean_absolute_error(actual, pred)
-    r2 = r2_score(actual, pred)
-    return rmse, mae, r2
 
-
-if __name__ == "__main__":
-    warnings.filterwarnings("ignore")
-    np.random.seed(40)
-
-    # === DON'T FORGET: point at the running MLflow server ===
-    mlflow.set_tracking_uri("http://localhost:5000")
-    print("Tracking URI:", mlflow.get_tracking_uri())
-
-    # Read the wine-quality CSV (comma-separated)
-    data = pd.read_csv("data/red-wine-quality.csv")
-
-    # Split (default 0.75 / 0.25)
-    train, test = train_test_split(data)
-
-    # Predicted column is "quality" - integer in [3, 8]
-    train_x = train.drop(["quality"], axis=1)
-    test_x = test.drop(["quality"], axis=1)
-    train_y = train[["quality"]]
-    test_y = test[["quality"]]
-
-    alpha = args.alpha
-    l1_ratio = args.l1_ratio
-
-    exp = mlflow.set_experiment(experiment_name="experiment_1")
-
-    with mlflow.start_run(experiment_id=exp.experiment_id):
-        lr = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42)
-        lr.fit(train_x, train_y)
-
-        predicted_qualities = lr.predict(test_x)
-        (rmse, mae, r2) = eval_metrics(test_y, predicted_qualities)
-
-        print("Elasticnet model (alpha={:f}, l1_ratio={:f}):".format(alpha, l1_ratio))
-        print("  RMSE: %s" % rmse)
-        print("  MAE:  %s" % mae)
-        print("  R2:   %s" % r2)
-
-        mlflow.log_param("alpha", alpha)
-        mlflow.log_param("l1_ratio", l1_ratio)
-        mlflow.log_metric("rmse", rmse)
-        mlflow.log_metric("r2", r2)
-        mlflow.log_metric("mae", mae)
-        mlflow.sklearn.log_model(lr, "mymodel")
-```
-
-What was added compared to your original snippet:
-- `mlflow.set_tracking_uri("http://localhost:5000")` and `print(mlflow.get_tracking_uri())` — the two lines from chapters 01 and 02 that we **never** want to forget again.
-- `data/red-wine-quality.csv` is shipped with the project, so the script runs out of the box.
-- The redundant `data.to_csv("data/red-wine-quality.csv", index=False)` of the original snippet has been dropped — we just read the file once.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-7"></a>
-
-## 7. Run it, see the run + the model in the UI
-
-### 7.1 Start the MLflow server
+Then start the MLflow server:
 
 ```bash
-cd chap03-mlflow-step-by-step-recap-elasticnet-on-red-wine-quality
-docker compose up --build
+docker compose up -d --build
 ```
 
-Open [http://localhost:5000](http://localhost:5000).
-
-### 7.2 Run the script
-
-In another terminal (host venv activated):
-
-```bash
-python train.py --alpha 0.7 --l1_ratio 0.7
-```
-
-Output:
+Open the MLflow UI:
 
 ```text
-Tracking URI: http://localhost:5000
-Elasticnet model (alpha=0.700000, l1_ratio=0.700000):
-  RMSE: 0.7836...
-  MAE:  0.6260...
-  R2:   0.1063...
+http://localhost:5000
 ```
 
-### 7.3 Visualize in the UI
+At this point, the UI may be empty or may only show the default experiment. This is normal.
 
-Refresh [http://localhost:5000](http://localhost:5000):
 
-1. Click experiment **`experiment_1`** in the left sidebar.
-2. The run appears with the params (`alpha`, `l1_ratio`) and the metrics (`rmse`, `mae`, `r2`).
-3. Click the run, then **Artifacts** → folder **`mymodel/`**:
-   ```text
-   mymodel/
-   ├── MLmodel              ← MLflow descriptor
-   ├── conda.yaml           ← env that recreates the model
-   ├── python_env.yaml      ← pip-only env
-   ├── requirements.txt
-   └── model.pkl            ← the actual sklearn pickle
-   ```
 
-That's a **deployable model artifact** — chapters 16 and 17 of this course showed how to load it back and serve it.
+⚠️ Important: create `database/` and `mlruns/` before starting Docker.
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-8"></a>
-
-## 8. Mini exercise — a tiny grid search
-
-Run the script three times with different hyperparameters:
+If you forget them, stop Docker, create the folders, and restart with `--build`:
 
 ```bash
-python train.py --alpha 0.1 --l1_ratio 0.1
-python train.py --alpha 0.5 --l1_ratio 0.5
-python train.py --alpha 0.9 --l1_ratio 0.9
-```
+docker compose down
+mkdir -p database mlruns
+docker compose up -d --build
+````
 
-In the UI, switch to the **Table** view of `experiment_1` and sort by `metrics.rmse` ascending — you've just done your first hyperparameter search, fully tracked.
+The `--build` option forces Docker to rebuild instead of using the cache.
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
 
 ---
 
-<a id="section-9"></a>
+# 4. Run experiment 1
 
-## 9. Tear down
+Run the model with:
+
+```text
+alpha = 0.1
+l1_ratio = 0.1
+```
+
+Command:
 
 ```bash
-docker compose down       # keep all your runs
-docker compose down -v    # wipe everything (DB + artifacts)
+docker compose exec mlflow python train_with_mlflow.py --alpha 0.1 --l1_ratio 0.1
 ```
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+Then check:
+
+```text
+http://localhost:5000
+```
+
+You should see a new MLflow run.
 
 ---
 
-<a id="section-10"></a>
+# 5. Run experiment 2
 
-## 10. Recap and next chapter
+Run the model with:
 
-You've now closed the loop on the **MLflow basics** in three small steps:
+```text
+alpha = 0.5
+l1_ratio = 0.5
+```
 
-| Chapter | New thing |
-|---|---|
-| 01 | `set_tracking_uri` + `set_experiment` + `start_run` + `log_param` + `log_metric` |
-| 02 | `print(mlflow.get_tracking_uri())` — the safety net |
-| **03** | A real `ElasticNet` pipeline + `mlflow.sklearn.log_model(...)` |
+Command:
 
-Next: **[Chapter 04](./04-practical-work-mlflow-step-by-step-recap-running-the-training-in-a-second-docker-service-with-requirements-txt.md)** — move the training script **into Docker** as a second service alongside the MLflow server, with its own `requirements.txt` + `ENTRYPOINT ["python", "train.py"]`, so CLI arguments flow through `docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1`. From there, chapters 05 → 26b layer one MLflow concept at a time: env-var URI, tags, multiple runs, autolog, signature, registry, evaluation, projects, CLI.
+```bash
+docker compose exec mlflow python train.py --alpha 0.5 --l1_ratio 0.5
+```
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+Then check again:
+
+```text
+http://localhost:5000
+```
+
+You should now see another run.
 
 ---
 
-<p align="center">
-  <strong>End of Chapter 03 — First ElasticNet pipeline on red-wine-quality</strong><br/>
-  <a href="#top">↑ Back to the top</a>
-</p>
+# 6. Run experiment 3
+
+Run the model with:
+
+```text
+alpha = 0.9
+l1_ratio = 0.9
+```
+
+Command:
+
+```bash
+docker compose exec mlflow python train.py --alpha 0.9 --l1_ratio 0.9
+```
+
+Then check again:
+
+```text
+http://localhost:5000
+```
+
+You should now see three different runs.
+
+---
+
+# 7. Compare the runs in MLflow
+
+In the MLflow UI, compare the runs using:
+
+```text
+Parameters
+Metrics
+Artifacts
+Model output
+```
+
+The important idea is this:
+
+```text
+Each run uses the same training script, but different hyperparameters.
+MLflow records each run separately.
+This allows you to compare which configuration gives the best results.
+```
+
+For example:
+
+```text
+Run 1: alpha = 0.1, l1_ratio = 0.1
+Run 2: alpha = 0.5, l1_ratio = 0.5
+Run 3: alpha = 0.9, l1_ratio = 0.9
+```
+
+---
+
+# 8. Stop the containers
+
+When you are finished:
+
+
+```bash
+docker compose down       # keep all runs
+docker compose down -v    # wipe everything
+```
+
+
+
+
+
+
+## ⚠️ Important warning — create the folders first
+
+⚠️ Be careful: if the two folders `database/` and `mlruns/` are not created before starting Docker, MLflow may not save the experiment data correctly.
+
+You may open the MLflow UI at:
+
+```text
+http://localhost:5000
+````
+
+but you may not see your runs, metrics, parameters, or artifacts.
+
+Before running Docker, create the two folders manually:
+
+```bash
+mkdir -p database mlruns
+```
+
+On Windows PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force database, mlruns
+```
+
+If you already started Docker without creating these folders, do this:
+
+```bash
+docker compose down
+mkdir -p database mlruns
+docker compose up -d --build
+```
+
+On Windows PowerShell:
+
+```powershell
+docker compose down
+New-Item -ItemType Directory -Force database, mlruns
+docker compose up -d --build
+```
+
+⚠️ The `--build` option is important here.
+
+It forces Docker to rebuild the image instead of reusing the previous cached version.
+
+Without `--build`, Docker may reuse the old cached configuration, and your fix may not be applied correctly.
+
+---
+
+# Final command recap
+
+```bash
+git clone https://github.com/inskillflow/mlops-beginner-level-01-en.git
+
+cd mlops-beginner-level-01-en/chap01-mlflow-step-by-step-recap-hello-mlflow-basics
+# done
+
+cd ../chap02-mlflow-step-by-step-recap-printing-the-tracking-uri
+# done
+
+cd ../chap03-mlflow-step-by-step-recap-elasticnet-on-red-wine-quality
+# start project #3
+
+mkdir -p database mlruns
+
+docker compose up -d --build
+
+docker compose exec mlflow python train.py --alpha 0.1 --l1_ratio 0.1
+docker compose exec mlflow python train.py --alpha 0.5 --l1_ratio 0.5
+docker compose exec mlflow python train.py --alpha 0.9 --l1_ratio 0.9
+
+docker compose down
+```
+
+PowerShell version:
+
+```powershell
+git clone https://github.com/inskillflow/mlops-beginner-level-01-en.git
+
+cd mlops-beginner-level-01-en/chap01-mlflow-step-by-step-recap-hello-mlflow-basics
+# done
+
+cd ../chap02-mlflow-step-by-step-recap-printing-the-tracking-uri
+# done
+
+cd ../chap03-mlflow-step-by-step-recap-elasticnet-on-red-wine-quality
+# start project #3
+
+New-Item -ItemType Directory -Force database, mlruns
+
+docker compose up -d --build
+
+docker compose exec mlflow python train.py --alpha 0.1 --l1_ratio 0.1
+docker compose exec mlflow python train.py --alpha 0.5 --l1_ratio 0.5
+docker compose exec mlflow python train.py --alpha 0.9 --l1_ratio 0.9
+
+docker compose down
+```
+
+---
+
+# To enter the container manually
+
+First list the running containers:
+
+```bash
+docker ps
+```
+
+Then enter the MLflow container:
+
+```bash
+docker exec -it <container_id> bash
+```
+
+Inside the container:
+
+```bash
+ls
+python train_with_mlflow.py --alpha 0.1 --l1_ratio 0.1
+exit
+```
+
+The Docker Compose equivalent is simpler:
+
+```bash
+docker compose exec mlflow bash
+```
+
+---
+
+# Why not use `-d` with `docker compose exec`?
+
+You may see this command:
+
+```bash
+docker compose exec -d mlflow python train.py --alpha 0.1 --l1_ratio 0.1
+```
+
+It works, but it runs the script in detached mode.
+
+
+## Recommended version ⚠️⚠️ :
+
+```bash
+docker compose exec mlflow python train.py --alpha 0.1 --l1_ratio 0.1
+```
+
+This way, if something goes wrong, the error appears immediately in the console !!!!
+
+---
+
+# What happens if I forgot to create `mlruns` and `database`?
+
+If you forgot to create these folders before starting Docker, you may have problems with:
+
+```text
+SQLite database permissions
+MLflow metadata storage
+artifact storage
+root-owned folders
+bind mount errors
+```
+
+In simple words:
+
+```text
+MLflow needs a place to store experiment information and artifacts.
+The database/ folder stores the SQLite metadata.
+The mlruns/ folder stores the run artifacts.
+If these folders are missing or created incorrectly, MLflow may not be able to write data properly.
+```
+
+---
+
+# How to fix it
+
+## Step 1 — Stop the containers
+
+```bash
+docker compose down
+```
+
+## Step 2 — Create the required folders
+
+Linux, macOS, Git Bash:
+
+```bash
+mkdir -p database mlruns
+```
+
+Windows PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force database, mlruns
+```
+
+## Step 3 — Rebuild and restart the containers
+
+```bash
+docker compose up -d --build
+```
+
+The `--build` option forces Docker to rebuild the image.
+
+This is useful when:
+
+```text
+the Dockerfile changed
+dependencies changed
+the environment needs to be refreshed
+the previous container was created incorrectly
+```
+
+## Step 4 — Run the training script again
+
+```bash
+docker compose exec mlflow python train.py --alpha 0.1 --l1_ratio 0.1
+```
+
+Then open:
+
+```text
+http://localhost:5000
+```
+
+---
+
+# Troubleshooting 1 : port 5000 already used ⚠️
+
+On Windows CMD:
+
+```bat
+netstat -ano | findstr :5000
+tasklist | findstr 12345
+taskkill /PID 12345 /F
+```
+
+On PowerShell:
+
+```powershell
+Get-NetTCPConnection -LocalPort 5000
+Stop-Process -Id 12345 -Force
+```
+
+Replace `12345` with the PID shown by the command.
+
+Simple explanation:
+
+Port `5000` is like a door. If another application is already using this door, MLflow cannot start on the same port. You must either stop the other application or change the port used by MLflow.
+
+
+
+
+
+---
+
+# Troubleshooting 2 : docker Desktop not starting ⚠️
+
+
+
+Open **PowerShell as Administrator**, then run this:
+
+```powershell
+# 1. Stop Docker Desktop processes
+Get-Process *docker* -ErrorAction SilentlyContinue | Stop-Process -Force
+
+# 2. Stop Docker Desktop service
+Stop-Service com.docker.service -Force -ErrorAction SilentlyContinue
+
+# 3. Force-stop WSL backend used by Docker
+wsl --shutdown
+```
+
+Then wait **10–15 seconds**.
+
+To restart Docker Desktop:
+
+```powershell
+Start-Service com.docker.service
+Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+```
+
+If it is still frozen, use the stronger version:
+
+```powershell
+taskkill /F /IM "Docker Desktop.exe"
+taskkill /F /IM "com.docker.backend.exe"
+taskkill /F /IM "com.docker.service.exe"
+taskkill /F /IM "dockerd.exe"
+wsl --shutdown
+```
+
+Then restart Docker Desktop manually from the Start menu.
+
+Do **not** delete Docker folders yet. First try force stop + `wsl --shutdown`.
+
+
+
+
+
+

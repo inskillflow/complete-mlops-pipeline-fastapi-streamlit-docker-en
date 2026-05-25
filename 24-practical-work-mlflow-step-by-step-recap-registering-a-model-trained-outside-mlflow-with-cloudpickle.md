@@ -1,489 +1,299 @@
-﻿<a id="top"></a>
+﻿# chap24 - Step-by-step recap: registering a model trained OUTSIDE MLflow (cloudpickle import)
 
-# Chapter 24 — Step-by-step recap: registering a model that was trained **outside** MLflow (load `.pkl` → `mlflow.sklearn.log_model(serialization_format="cloudpickle", registered_model_name=...)`)
+The full lesson lives at [../24-practical-work-mlflow-step-by-step-recap-registering-a-model-trained-outside-mlflow-with-cloudpickle.md](../24-practical-work-mlflow-step-by-step-recap-registering-a-model-trained-outside-mlflow-with-cloudpickle.md).
 
-## Table of Contents
+> **In one line.** This chapter is about how to **split the workflow into two one-shot Docker services: a `pretrainer` that trains a model WITHOUT touching MLflow (`pickle.dump` + done) and a `registrar` that **imports** that pickle, loads it, and pushes it into the registry with `mlflow.sklearn.log_model(..., serialization_format="cloudpickle", registered_model_name=...)`**.
 
-| # | Section |
-|---|---|
-| 1 | [Objective](#section-1) |
-| 2 | [What we add today vs chap 23](#section-2) |
-| 3 | [Real-world scenario: importing a "foreign" model](#section-3) |
-| 4 | [Two services in the same compose: `pretrainer` then `registrar`](#section-4) |
-| 5 | [`serialization_format="cloudpickle"` — what does it change?](#section-5) |
-| 6 | [Project structure](#section-6) |
-| 7 | [The code](#section-7) |
-| 8 | [Run it: produce the pickle, then register it](#section-8) |
-| 9 | [Tear down](#section-9) |
-| 10 | [Recap and next chapter](#section-10) |
-
----
-
-<a id="section-1"></a>
-
-## 1. Objective
-
-Until now every registered model came from a fresh MLflow training run. In real life that's the exception — most teams inherit at least one **pre-existing** model produced **outside** of MLflow:
-
-- A legacy `.pkl` from a notebook nobody dares re-run.
-- A model handed over by a partner / vendor / AutoML platform.
-- A model trained in a Spark / SageMaker / Vertex job that doesn't speak MLflow.
-
-The pattern is always the same:
-
-```python
-loaded = pickle.load(open("foreign_model.pkl", "rb"))      # bring it in memory
-mlflow.sklearn.log_model(                                  # push it into MLflow
-    sk_model=loaded,
-    artifact_path="model",
-    serialization_format="cloudpickle",
-    registered_model_name="elastic-net-regression-outside-mlflow",
-)
-```
-
-The model object isn't *trained* by MLflow but it **lands in the registry exactly like a freshly trained one** — same versioning, same `models:/<name>/<version>` URI, same downstream tooling.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-2"></a>
-
-## 2. What we add today vs chap 23
-
-| Diff | What |
-|---|---|
-| Two-step Docker workflow | First service produces `elastic-net-regression.pkl` outside any MLflow run; second service picks it up and registers it. |
-| `pretrainer/` service | Plain sklearn training, dumps a `.pkl` to a shared volume (no MLflow at all). |
-| `registrar/` service | `pickle.load` + `mlflow.sklearn.log_model(..., serialization_format="cloudpickle", registered_model_name=...)`. |
-| `serialization_format="cloudpickle"` | Explicit choice — covered below. |
-| New experiment name `experiment_register_outside` | Matches the user's snippet. |
-
-There is no training inside the registrar — just import + register.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-3"></a>
-
-## 3. Real-world scenario: importing a "foreign" model
-
-Step-by-step:
-
-1. **Outside MLflow** (the `pretrainer` service in our setup): some legacy or third-party process produces `elastic-net-regression.pkl` and drops it on a shared filesystem (S3, NFS, Docker volume…). It knows nothing of experiments, runs, parameters.
-
-2. **Inside MLflow** (the `registrar` service): a small bridge script runs once. It:
-   - Loads the `.pkl` with the standard library `pickle`.
-   - Connects to the MLflow tracking server.
-   - Opens a *cosmetic* run (just to give the artifact a place to live).
-   - Calls `mlflow.sklearn.log_model(...)` with `registered_model_name=` to push the artifact into the registry under a stable name.
-
-3. From now on **every consumer** treats the model exactly like a natively-trained one:
-
-   ```python
-   m = mlflow.pyfunc.load_model("models:/elastic-net-regression-outside-mlflow/1")
-   ```
+## Before you start — Create the host folders!
 
 > [!IMPORTANT]
-> The bridge run will have **no params and no metrics** — those would be lies. Add tags instead, e.g. `mlflow.set_tag("imported_from", "vendor X / 2026-04 batch")`. That way the UI clearly shows "this run is an import, not a training".
+> **You MUST create the local folders `database/` and `mlruns/` BEFORE the first `docker compose up`.**
+>
+> This chapter's `docker-compose.yml` uses **bind mounts** (host folders mapped INTO the `mlflow` container) for the tracking DB and artifacts, plus a separate **named volume `shared:`** that the `pretrainer` and `registrar` services share for the pickle handover. If the host folders don't exist, Docker will silently create them as **empty root-owned directories**.
+>
+> ### Create them now
+> ```bash
+> mkdir database mlruns       # bash / Git Bash / macOS / Linux / WSL
+> ```
+> ```powershell
+> New-Item -ItemType Directory database, mlruns -Force | Out-Null   # PowerShell
+> ```
+>
+> ### What ends up in those folders — and what `working_dir` is for
+>
+> | Host (your laptop, this chapter folder) | Container path                                | What lives there                                          |
+> | --------------------------------------- | --------------------------------------------- | --------------------------------------------------------- |
+> | `./database/`                           | `/mlflow/database/` (in `mlflow`)             | `mlflow.db` — the SQLite tracking store                   |
+> | `./mlruns/`                             | `/mlflow/mlruns/`  (in `mlflow`)              | Artifacts + the registered `external-elasticnet` model    |
+> | `.` (the entire chapter folder)         | `/work/`  ←  this is `working_dir:` in mlflow | The full project tree: `pretrainer/`, `registrar/`, ...   |
+> | (named volume `shared:`)                | `/shared/` (in `pretrainer` and `registrar`)  | `external_model.pkl` produced by `pretrainer`             |
+>
+> The `.:/work` mount plus `working_dir: /work` is what makes **Docker Desktop → Containers → `mlflow-recap-24` → Exec → `ls`** show all your project files (so you can run `python registrar/register_external.py` from there). `working_dir:` is a Compose directive that sets the default cwd for `RUN`, `CMD` and any `docker compose exec`.
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+## Two ways to launch the workflow
 
----
+> [!NOTE]
+> **Way A — canonical (run the two one-shot containers in order, recommended for the lesson):**
+> ```bash
+> docker compose run --rm pretrainer        # writes /shared/external_model.pkl (no MLflow)
+> docker compose run --rm registrar         # loads pickle, registers it in MLflow
+> ```
+>
+> **Way B — via `docker compose exec` inside the running `mlflow` container (Docker Desktop friendly):**
+> ```bash
+> docker compose run --rm pretrainer        # still needed: produces /shared/external_model.pkl
+> docker compose exec mlflow python registrar/register_external.py
+> ```
+>
+> The `pretrainer` MUST be a one-shot container — it has no MLflow client and writes the pickle to the `shared` named volume; you cannot run it from the `mlflow` container because the `mlflow` container has no access to `shared/`. The `registrar` script CAN run either as its own container OR directly inside `mlflow` (the `mlflow` image has `mlflow.sklearn.log_model`, and since `.:/work` is mounted, the script file is visible — BUT the `mlflow` container has no `/shared/` mount, so Way B reads the pickle from `./shared` only if you tweak the mount. In practice, prefer Way A.). Both paths produce the same registered model `external-elasticnet` in the MLflow Registry. If a run does NOT appear in the UI, force the URI with: `docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python registrar/register_external.py`.
 
-<a id="section-4"></a>
+## What is new vs chap23
 
-## 4. Two services in the same compose: `pretrainer` then `registrar`
+- Two trainer services: `pretrainer/` (pure sklearn, no MLflow) and `registrar/` (MLflow-aware import job)
+- `pretrainer/train_outside_mlflow.py` -> writes `/shared/external_model.pkl`
+- `registrar/register_external.py` -> `pickle.load(...)` then `mlflow.sklearn.log_model(loaded, "model", serialization_format="cloudpickle", registered_model_name="external-elasticnet")`
+- Named volume `shared:/shared` mounted on BOTH services for the handover
+- `cloudpickle` (instead of vanilla `pickle`) -> robust for sklearn objects with closures, lambdas, custom transformers
 
-We model the real-world separation directly in `docker-compose.yml`:
+This chapter adds extra service(s) on top of the standard mlflow + trainer pair: **pretrainer, registrar**. See the lesson .md for the rationale.
 
-```yaml
-services:
-  mlflow:        # tracking server (SQLite backend)
-    ...
 
-  pretrainer:    # NO MLflow involvement at all
-    image: mlops/pretrainer:latest
-    volumes:
-      - shared:/shared      # writes /shared/elastic-net-regression.pkl
+## Project structure
 
-  registrar:     # bridge: load pickle -> MLflow registry
-    image: mlops/registrar:latest
-    environment:
-      MLFLOW_TRACKING_URI: "http://mlflow:5000"
-    volumes:
-      - shared:/shared      # reads /shared/elastic-net-regression.pkl
+The project follows the canonical recap layout (see [section 8 of the root README](../README.md#section-8) for the full reference):
 
-volumes:
-  shared:        # named volume the two services exchange the pickle through
+```text
+chap24-.../
++- README.md                 <- this file
++- docker-compose.yml        <- mlflow + trainer + pretrainer + registrar
++- mlflow/
+|  +- Dockerfile             <- mlflow tracking server image
++- data/
+|  +- red-wine-quality.csv
++- trainer/                  <- training service
+   +- Dockerfile
+   +- requirements.txt
+   +- train.py
 ```
 
-Workflow:
+## Run it (100% Docker, no Python on the host)
+
+This is the **canonical run sequence** for the recap series. It is the same for every chapter from 04 onward; only the trainer arguments change.
+
+### 1. Move into the chapter
+
+```bash
+cd chap24-mlflow-step-by-step-recap...
+```
+
+### 2. Build everything and start the MLflow server in the background
 
 ```bash
 docker compose up -d --build mlflow
-docker compose run --rm pretrainer    # produces /shared/elastic-net-regression.pkl
-docker compose run --rm registrar     # loads it and registers it
 ```
 
-Each service has a different image and a totally different `requirements.txt` — exactly like a real "external producer" + "MLflow bridge".
+- `-d` runs the server detached so this terminal stays free for the trainer.
+- `--build` forces a rebuild if any `Dockerfile` or `requirements.txt` changed.
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-5"></a>
-
-## 5. `serialization_format="cloudpickle"` — what does it change?
-
-`mlflow.sklearn.log_model` accepts two values:
-
-| Value | What MLflow uses to write the model on disk |
-|---|---|
-| `"cloudpickle"` (default) | `cloudpickle.dump(model, ...)` — handles closures, lambdas, locally-defined classes. |
-| `"pickle"` | `pickle.dump(model, ...)` — slightly smaller, fails on closures / locally-defined classes. |
-
-For a vanilla `sklearn.linear_model.ElasticNet` they produce nearly identical files. The reason **cloudpickle is the default** is robustness:
-
-- Models that include custom transformers or wrappers defined inside a function will only survive `cloudpickle`, not `pickle`.
-- Cross-session / cross-machine compatibility is much better with cloudpickle.
-
-Passing `serialization_format="cloudpickle"` here is **explicit-is-better-than-implicit** — you're stating in the code that this artifact will be re-read by potentially different Python interpreters.
-
-> [!NOTE]
-> Whatever value you pick, `mlflow.pyfunc.load_model` reads the right format automatically (it inspects the `MLmodel` YAML).
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-6"></a>
-
-## 6. Project structure
-
-```text
-chap24-mlflow-step-by-step-recap-registering-a-model-trained-outside-mlflow-with-cloudpickle/
-├── README.md
-├── docker-compose.yml
-├── data/
-│   └── red-wine-quality.csv
-├── mlflow/
-│   └── Dockerfile
-├── pretrainer/                  ← knows NOTHING about MLflow
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── train_outside_mlflow.py  ← writes /shared/elastic-net-regression.pkl
-└── registrar/                   ← bridge to MLflow registry
-    ├── Dockerfile
-    ├── requirements.txt
-    └── register_external.py     ← pickle.load + log_model + registry
-```
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-7"></a>
-
-## 7. The code
-
-### 7.1 `pretrainer/train_outside_mlflow.py`
-
-A perfectly normal sklearn script. No `import mlflow` anywhere.
-
-```python
-"""Trains an ElasticNet and dumps it to /shared/elastic-net-regression.pkl.
-Runs OUTSIDE any MLflow context. Could just as well be a SageMaker job,
-a notebook a colleague sent you, or a vendor's binary blob."""
-
-import argparse
-import os
-import pickle
-import warnings
-
-import numpy as np
-import pandas as pd
-from sklearn.linear_model import ElasticNet
-from sklearn.metrics import (
-    mean_absolute_error, mean_squared_error, r2_score
-)
-from sklearn.model_selection import train_test_split
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--alpha",    type=float, default=0.4)
-parser.add_argument("--l1_ratio", type=float, default=0.4)
-args = parser.parse_args()
-
-
-def eval_metrics(actual, pred):
-    return (
-        np.sqrt(mean_squared_error(actual, pred)),
-        mean_absolute_error(actual, pred),
-        r2_score(actual, pred),
-    )
-
-
-if __name__ == "__main__":
-    warnings.filterwarnings("ignore")
-    np.random.seed(40)
-
-    data = pd.read_csv("data/red-wine-quality.csv")
-    train, test = train_test_split(data, test_size=0.25)
-
-    train_x = train.drop(["quality"], axis=1)
-    test_x  = test.drop(["quality"], axis=1)
-    train_y = train[["quality"]]
-    test_y  = test[["quality"]]
-
-    lr = ElasticNet(alpha=args.alpha, l1_ratio=args.l1_ratio, random_state=42)
-    lr.fit(train_x, train_y)
-
-    rmse, mae, r2 = eval_metrics(test_y, lr.predict(test_x))
-    print(f"[pretrainer] ElasticNet trained: RMSE={rmse:.4f}  MAE={mae:.4f}  R2={r2:.4f}")
-
-    out_dir = "/shared"
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "elastic-net-regression.pkl")
-    with open(out_path, "wb") as f:
-        pickle.dump(lr, f)
-    print(f"[pretrainer] Wrote {out_path}")
-```
-
-### 7.2 `registrar/register_external.py`
-
-The bridge: ~15 useful lines.
-
-```python
-"""Loads a model trained outside MLflow and registers it in the MLflow registry."""
-
-import os
-import pickle
-
-import mlflow
-import mlflow.sklearn
-
-REGISTERED_NAME = "elastic-net-regression-outside-mlflow"
-PICKLE_PATH = "/shared/elastic-net-regression.pkl"
-
-
-if __name__ == "__main__":
-    mlflow.set_tracking_uri(
-        os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-    )
-    print("[registrar] Tracking URI:", mlflow.get_tracking_uri())
-
-    if not os.path.exists(PICKLE_PATH):
-        raise SystemExit(
-            f"[registrar] {PICKLE_PATH} not found. "
-            f"Run `docker compose run --rm pretrainer` first."
-        )
-
-    with open(PICKLE_PATH, "rb") as f:
-        loaded_model = pickle.load(f)
-    print(f"[registrar] Loaded model from {PICKLE_PATH}: {type(loaded_model).__name__}")
-
-    exp = mlflow.set_experiment(experiment_name="experiment_register_outside")
-    print(f"[registrar] Experiment: {exp.name} (id={exp.experiment_id})")
-
-    with mlflow.start_run() as run:
-        # Document the import - NO params/metrics (they would be lies)
-        mlflow.set_tags({
-            "imported": "true",
-            "source":   "external_pickle",
-            "filename": os.path.basename(PICKLE_PATH),
-        })
-
-        model_info = mlflow.sklearn.log_model(
-            sk_model=loaded_model,
-            artifact_path="model",
-            serialization_format="cloudpickle",
-            registered_model_name=REGISTERED_NAME,
-        )
-
-        print(f"[registrar] Logged model URI: {model_info.model_uri}")
-        print(f"[registrar] Registered as     : {REGISTERED_NAME!r}")
-        print(f"[registrar] Run id            : {run.info.run_id}")
-```
-
-### 7.3 `docker-compose.yml`
-
-```yaml
-services:
-  mlflow:
-    build: { context: ./mlflow }
-    ports: ["5000:5000"]
-    volumes:
-      - mlflow-db:/mlflow/database
-      - mlflow-artifacts:/mlflow/mlruns
-    networks: [recap-net]
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000').status==200 else 1)"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  pretrainer:
-    build: { context: ./pretrainer }
-    container_name: pretrainer-recap-24
-    volumes:
-      - ./data:/code/data
-      - shared:/shared
-
-  registrar:
-    build: { context: ./registrar }
-    container_name: registrar-recap-24
-    environment:
-      MLFLOW_TRACKING_URI: "http://mlflow:5000"
-    volumes:
-      - shared:/shared
-    networks: [recap-net]
-    depends_on: { mlflow: { condition: service_healthy } }
-
-volumes:
-  mlflow-db:
-  mlflow-artifacts:
-  shared:        # the bridge between pretrainer and registrar
-
-networks:
-  recap-net:
-    driver: bridge
-```
-
-### 7.4 Requirements files
-
-`pretrainer/requirements.txt` — **no MLflow**:
-
-```text
-scikit-learn==1.5.2
-pandas==2.2.3
-numpy==2.1.1
-```
-
-`registrar/requirements.txt` — adds MLflow + cloudpickle:
-
-```text
-mlflow==2.16.2
-scikit-learn==1.5.2
-pandas==2.2.3
-numpy==2.1.1
-cloudpickle==3.0.0
-```
-
-### 7.5 Dockerfiles (one per service)
-
-```dockerfile
-# pretrainer/Dockerfile
-FROM python:3.12-slim
-WORKDIR /code
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY train_outside_mlflow.py .
-ENTRYPOINT ["python", "train_outside_mlflow.py"]
-```
-
-```dockerfile
-# registrar/Dockerfile
-FROM python:3.12-slim
-WORKDIR /code
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY register_external.py .
-ENTRYPOINT ["python", "register_external.py"]
-```
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-8"></a>
-
-## 8. Run it: produce the pickle, then register it
+Verify with:
 
 ```bash
-cd chap24-mlflow-step-by-step-recap-registering-a-model-trained-outside-mlflow-with-cloudpickle
+docker compose ps
+# mlflow-recap-24    Up X seconds (healthy)
+```
+
+Open [http://localhost:5000](http://localhost:5000). The UI is empty for now (only `Default`) unless you have persistent volumes from a previous chapter.
+
+### 3. Run the trainer (with CLI args)
+
+```bash
+docker compose run --rm pretrainer --alpha 0.4 --l1_ratio 0.4
+docker compose run --rm registrar
+```
+
+### 4. Refresh the MLflow UI
+
+Open / refresh [http://localhost:5000](http://localhost:5000). Expected:
+
+- Experiment: `external_models`
+- 1 run in `external_models` + an `external-elasticnet` entry in the **Models** tab. The model never saw `mlflow.start_run()` during training -- only during the import.
+
+> **Chapter quirk.** `cloudpickle` serializes things `pickle` cannot (closures, lambdas, dynamic classes). It is a strict superset for sklearn objects. Use it whenever you are importing a model produced by code you don't fully control.
+
+### 5. Tear down
+
+```bash
+docker compose down       # keep volumes (DB + artifacts survive)
+docker compose down -v    # wipe everything (DB + artifacts + this chapter's named volumes)
+```
+
+## What ends up on your host
+
+This chapter uses **named Docker volumes** rather than host-side bind mounts for the MLflow data:
+
+| Volume | Contents |
+|---|---|
+| `mlflow-db`  | SQLite metadata DB (experiments, runs, registered models) |
+| `mlflow-artifacts` | Pickled models, signatures, plots, CSVs |
+| `shared` | Handover folder between `pretrainer` and `registrar` |
+
+Inspect them with:
+
+```bash
+docker volume ls | grep recap
+docker volume inspect <volume_name>
+```
+
+These volumes survive `docker compose down`. Only `docker compose down -v` wipes them.
+
+## Recap (bash, one-shot)
+
+```bash
+cd chap24-mlflow-step-by-step-recap...
+
 docker compose up -d --build mlflow
 
 docker compose run --rm pretrainer --alpha 0.4 --l1_ratio 0.4
-# [pretrainer] ElasticNet trained: RMSE=0.7785 MAE=0.6223 R2=0.1054
-# [pretrainer] Wrote /shared/elastic-net-regression.pkl
-
 docker compose run --rm registrar
-# [registrar] Tracking URI: http://mlflow:5000
-# [registrar] Loaded model from /shared/elastic-net-regression.pkl: ElasticNet
-# [registrar] Experiment: experiment_register_outside (id=N)
-# Successfully registered model 'elastic-net-regression-outside-mlflow'.
-# Created version '1' of model 'elastic-net-regression-outside-mlflow'.
-# [registrar] Logged model URI: runs:/<run_id>/model
-# [registrar] Registered as     : 'elastic-net-regression-outside-mlflow'
-# [registrar] Run id            : <run_id>
+
+# Open http://localhost:5000 and inspect the runs in experiment 'external_models'.
+
+docker compose down
 ```
 
-In the UI ([http://localhost:5000](http://localhost:5000)):
+## Recap (Windows PowerShell)
 
-- **Experiments tab** → `experiment_register_outside` → 1 run with **no params, no metrics**, but tags `imported=true / source=external_pickle / filename=elastic-net-regression.pkl`. That immediately tells anyone browsing that this is an import.
-- **Models tab** → `elastic-net-regression-outside-mlflow` → Version 1, sourced from `runs:/<run_id>/model`.
+```powershell
+cd chap24-mlflow-step-by-step-recap...
 
-You can re-run `docker compose run --rm pretrainer` with different hyperparameters and `docker compose run --rm registrar` again — Version 2 will be added, etc.
+docker compose up -d --build mlflow
 
-### Loading the imported model from anywhere
+docker compose run --rm pretrainer --alpha 0.4 --l1_ratio 0.4
+docker compose run --rm registrar
 
-```python
-import mlflow.pyfunc, pandas as pd
-m = mlflow.pyfunc.load_model("models:/elastic-net-regression-outside-mlflow/1")
-print(m.predict(pd.DataFrame([{
-    "fixed acidity": 7.2, "volatile acidity": 0.35, "citric acid": 0.45,
-    "residual sugar": 8.5, "chlorides": 0.045, "free sulfur dioxide": 30.0,
-    "total sulfur dioxide": 120.0, "density": 0.997, "pH": 3.2,
-    "sulphates": 0.65, "alcohol": 9.2,
-}])))
+# Open http://localhost:5000 and inspect the runs in experiment 'external_models'.
+
+docker compose down
 ```
 
-Indistinguishable from a model that was originally trained with MLflow. That's the point.
+## Enter the trainer container manually (debugging)
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+Sometimes you want a shell inside the trainer to inspect the filesystem, the env, or to step through the script line by line:
 
----
+```bash
+docker compose run --rm --entrypoint bash trainer
+# inside:
+#   cat train.py
+#   ls /code/data
+#   env | grep MLFLOW
+#   python train.py --alpha 0.5 --l1_ratio 0.5
+#   exit
+```
 
-<a id="section-9"></a>
+The `--entrypoint bash` flag overrides the image's `ENTRYPOINT ["python", "train.py"]` and drops you into a shell instead.
 
-## 9. Tear down
+## Troubleshooting
+
+<details>
+<summary><strong>Port 5000 already in use on Windows</strong></summary>
+
+The MLflow server publishes `5000:5000`. If something else is already on port 5000 the container fails to start.
+
+CMD:
+
+```bat
+netstat -ano | findstr :5000
+:: Last column is the PID. Then:
+tasklist | findstr 12345
+taskkill /PID 12345 /F
+```
+
+PowerShell:
+
+```powershell
+Get-NetTCPConnection -LocalPort 5000
+Stop-Process -Id 12345 -Force
+```
+
+Port 5000 is the most common collision (Flask dev servers, AirPlay on macOS, `Hyper-V`, `IIS`, `netbios`, a previous MLflow chapter you forgot to `docker compose down`).
+
+</details>
+
+<details>
+<summary><strong>Docker Desktop frozen / containers stuck in `Created`</strong></summary>
+
+Open **PowerShell as Administrator**:
+
+```powershell
+# 1. Stop Docker Desktop processes
+Get-Process *docker* -ErrorAction SilentlyContinue | Stop-Process -Force
+
+# 2. Stop the Docker service
+Stop-Service com.docker.service -Force -ErrorAction SilentlyContinue
+
+# 3. Force-stop the WSL backend
+wsl --shutdown
+```
+
+Wait 10-15 seconds, then:
+
+```powershell
+Start-Service com.docker.service
+Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+```
+
+If still frozen:
+
+```powershell
+taskkill /F /IM "Docker Desktop.exe"
+taskkill /F /IM "com.docker.backend.exe"
+taskkill /F /IM "com.docker.service.exe"
+taskkill /F /IM "dockerd.exe"
+wsl --shutdown
+```
+
+Then restart Docker Desktop from the Start menu.
+
+</details>
+
+<details>
+<summary><strong>Trainer says `Tracking URI: file:///code/mlruns`</strong></summary>
+
+That means the trainer did NOT see `MLFLOW_TRACKING_URI`. Three places to check:
+
+1. `docker-compose.yml` -> trainer -> `environment: MLFLOW_TRACKING_URI:` is present.
+2. You launched via `docker compose run --rm trainer ...` (not `docker run` directly).
+3. The MLflow service is healthy: `docker compose ps` -> `mlflow-recap-24 ... healthy`.
+
+Override at runtime if needed:
+
+```bash
+docker compose run --rm -e MLFLOW_TRACKING_URI=http://mlflow:5000 trainer --alpha 0.4 --l1_ratio 0.4
+```
+
+</details>
+
+<details>
+<summary><strong>Trainer fails immediately with `Image not found` / `manifest unknown`</strong></summary>
+
+You forgot `--build` or the trainer image is stale.
 
 ```bash
 docker compose down
-docker compose down -v        # -v also drops the `shared` volume holding the .pkl
+docker compose up -d --build mlflow
+docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.4
 ```
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+If `--build` itself fails, prune and retry:
 
----
-
-<a id="section-10"></a>
-
-## 10. Recap and next chapter
-
-Three lines turn any sklearn `.pkl` into a fully-fledged registry entry:
-
-```python
-loaded = pickle.load(open("foreign.pkl", "rb"))
-with mlflow.start_run():
-    mlflow.sklearn.log_model(
-        sk_model=loaded,
-        artifact_path="model",
-        serialization_format="cloudpickle",
-        registered_model_name="my-foreign-model",
-    )
+```bash
+docker compose down -v
+docker builder prune -af
+docker compose up -d --build mlflow
 ```
 
-`pretrainer` + `registrar` services in `docker-compose.yml` mirror the real-world separation between the model's **producer** and the **MLflow bridge**.
+</details>
 
-Next: **[Chapter 25](./25-practical-work-mlflow-step-by-step-recap-with-start-run-context-manager-and-main-function.md)** — replace the imperative `mlflow.start_run() / mlflow.end_run()` style with the idiomatic Pythonic context manager `with mlflow.start_run(experiment_id=exp.experiment_id):`, all wrapped in a clean `main()` function.
+## Next chapter
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<p align="center">
-  <strong>End of Chapter 24 — registering a model trained outside MLflow</strong><br/>
-  <a href="#top">↑ Back to the top</a>
-</p>
+**Next**: [chap25](../25-practical-work-mlflow-step-by-step-recap-with-start-run-context-manager-and-main-function.md) -- replace the imperative `mlflow.start_run() / mlflow.end_run()` style with the idiomatic Pythonic context manager `with mlflow.start_run(experiment_id=exp.experiment_id):` wrapped in a clean `main()` function.

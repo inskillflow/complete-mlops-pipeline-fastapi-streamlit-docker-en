@@ -1,0 +1,12 @@
+services:
+  fastapi:
+    build:
+      context: ./fastapi
+    image: mlops/fastapi-recap:latest
+    container_name: fastapi-recap-27
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app                          # so main.py is visible inside (hot reload)
+    working_dir: /app
+    restart: unless-stopped

@@ -1,396 +1,291 @@
-﻿<a id="top"></a>
+﻿# chap07 - Step-by-step recap: `active_run`, `last_active_run`, and the imperative `start_run` / `end_run` style
 
-# Chapter 07 — Step-by-step recap: `active_run` + `last_active_run` (and the `start_run` / `end_run` style without `with`)
+The full lesson lives at [../07-practical-work-mlflow-step-by-step-recap-active-run-and-last-active-run-with-start-end-run.md](../07-practical-work-mlflow-step-by-step-recap-active-run-and-last-active-run-with-start-end-run.md).
 
-## Table of Contents
+> **In one line.** This chapter is about how to **instrument the script with `mlflow.active_run()` (live introspection) and `mlflow.last_active_run()` (post-mortem), and contrast the imperative `start_run() / end_run()` pair with the context manager seen earlier**.
 
-| # | Section |
-|---|---|
-| 1 | [Objective](#section-1) |
-| 2 | [What we add today vs chap 06](#section-2) |
-| 3 | [`with start_run()` vs `start_run()` + `end_run()`](#section-3) |
-| 4 | [`active_run()` vs `last_active_run()`](#section-4) |
-| 5 | [Project structure](#section-5) |
-| 6 | [The code](#section-6) |
-| 7 | [Run it, observe both helpers](#section-7) |
-| 8 | [Mini exercise — a deliberate crash](#section-8) |
-| 9 | [Tear down](#section-9) |
-| 10 | [Recap and next chapter](#section-10) |
 
----
-
-<a id="section-1"></a>
-
-## 1. Objective
-
-Two new helpers today:
-
-- **`mlflow.active_run()`** — returns the run that is **currently** active (or `None` if there isn't one). Useful when you need the `run_id` *during* training to log something extra.
-- **`mlflow.last_active_run()`** — returns the **most recently active** run, even after `mlflow.end_run()` has been called. Useful when you want a final summary (`run_id`, `run_name`, status…) **after** the training block.
-
-To make their behaviour unambiguous, today's `train.py` deliberately uses the **imperative pattern**: `mlflow.start_run()` followed (much later) by `mlflow.end_run()` — instead of the cleaner `with mlflow.start_run() as run:` we used in 01 -> f.
-
-Both styles work. Knowing both is essential because real codebases mix them.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-2"></a>
-
-## 2. What we add today vs chap 06
-
-| Diff | What |
-|---|---|
-| Switch from `with mlflow.start_run(...):` to `mlflow.start_run()` + `mlflow.end_run()` | The "imperative" style. |
-| Print **all six** experiment metadata fields (`name`, `experiment_id`, `artifact_location`, `tags`, `lifecycle_stage`, `creation_time`) | See exactly what `set_experiment` returned. |
-| Add a **mid-run** `mlflow.active_run()` call to grab the `run_id` while the run is still open | The new helper #1. |
-| Call `mlflow.last_active_run()` **after** `mlflow.end_run()` to print final summary | The new helper #2. |
-| Model logged under the name `my_new_model_1` (matches your snippet) | Pure cosmetic. |
-
-Everything else (env-var-based tracking URI, multi-service Docker, `requirements.txt`, CLI args via `ENTRYPOINT`) stays exactly as in chap 05/f.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-3"></a>
-
-## 3. `with start_run()` vs `start_run()` + `end_run()`
-
-```python
-# Style A — context manager (the one we used until chap 06)
-with mlflow.start_run(run_name="my_run") as run:
-    print("Inside:", run.info.run_id)
-    mlflow.log_param("x", 1)
-# end_run() is called automatically here, even on exception
-
-# Style B — imperative (today)
-mlflow.start_run(run_name="my_run")
-print("Inside:", mlflow.active_run().info.run_id)
-mlflow.log_param("x", 1)
-mlflow.end_run()
-```
-
-| Style | Pros | Cons |
-|---|---|---|
-| **A. `with`** (recommended) | Auto-closes the run on exception. No way to forget `end_run()`. Block scoping makes the run's lifetime obvious. | The `run` object is only visible inside the block. |
-| **B. imperative** | The run object is visible to the rest of the function. Easier to spread training across multiple helper functions. | If your code raises before `end_run()`, the run stays open with status `RUNNING` forever (well, until you restart MLflow). |
+## Before you start — Create the host folders!
 
 > [!IMPORTANT]
-> In production: prefer **Style A**. In notebooks / step-by-step scripts: Style B is fine and a touch more readable. Today we showcase Style B because it makes `active_run` and `last_active_run` more visible.
+> **You MUST create the local folders `database/` and `mlruns/` BEFORE the first `docker compose up`.**
+>
+> This chapter's `docker-compose.yml` uses **bind mounts** (host folders mapped INTO the container), not anonymous Docker volumes. If the host folders don't exist, Docker will silently create them as **empty root-owned directories** that are hard to inspect or clean up from your editor on Windows, and you'll wonder why `mlflow.db` "disappears" when you run `docker compose down -v`.
+>
+> ### Create them now
+> ```bash
+> mkdir database mlruns       # bash / Git Bash / macOS / Linux / WSL
+> ```
+> ```powershell
+> New-Item -ItemType Directory database, mlruns -Force | Out-Null   # PowerShell
+> ```
+>
+> ### What ends up in those folders — and what `working_dir` is for
+>
+> | Host (your laptop, this chapter folder) | Container path (`mlflow` service)   | What lives there                                |
+> | --------------------------------------- | ----------------------------------- | ----------------------------------------------- |
+> | `./database/`                           | `/mlflow/database/`                 | `mlflow.db` — the SQLite tracking store         |
+> | `./mlruns/`                             | `/mlflow/mlruns/`                   | Artifacts: models, plots, metric files          |
+> | `.` (the entire chapter folder)         | `/work/`  ←  this is `working_dir:` | The full project tree: `trainer/`, `data/`, ... |
+>
+> The third mount (`.:/work`) plus `working_dir: /work` is what makes **Docker Desktop → Containers → `mlflow-recap-XX` → Exec → `ls`** show all your project files. Without it, `exec` would drop you in `/mlflow/` and you'd see nothing useful. `working_dir:` is a Docker Compose directive that sets the default cwd for `RUN`, `CMD` and any `docker compose exec` — think of it as `cd /work` baked into the container.
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+## Two ways to launch the training
 
----
+> [!NOTE]
+> **Way A — canonical (one-shot `trainer` container, recommended for the lesson):**
+> ```bash
+> docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> **Way B — via `docker compose exec` inside the running `mlflow` container (Docker Desktop friendly):**
+> ```bash
+> docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> Both run the same `train.py`. Way B works because `mlflow==2.16.2` brings `scikit-learn`, `pandas` and `numpy` as transitive deps. From chap05 onwards, the `MLFLOW_TRACKING_URI` env var is set on the `trainer` service in `docker-compose.yml` and `train.py` reads it via `os.getenv(...)`, so both Way A and Way B "just work" and the runs appear in the MLflow UI under the correct experiment. If a run does NOT appear in the UI, force the URI with: `docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py ...`
 
-<a id="section-4"></a>
+## What is new vs chap06
 
-## 4. `active_run()` vs `last_active_run()`
+- `run = mlflow.start_run(run_name=...)` -> imperative style, must be paired with `mlflow.end_run()`
+- `active = mlflow.active_run()` -> inspect the currently open run (status, info.run_id, info.experiment_id)
+- `last = mlflow.last_active_run()` -> access the previous run **after** it has been closed
+- Side-by-side prints of `active_run` vs `last_active_run` so you build intuition about MLflow's global state
 
-```python
-mlflow.start_run(run_name="r1")
-mlflow.active_run()        # → Run(r1, status=RUNNING)
-mlflow.last_active_run()   # → Run(r1, status=RUNNING)
-mlflow.end_run()
-mlflow.active_run()        # → None (no run is currently active)
-mlflow.last_active_run()   # → Run(r1, status=FINISHED)  ← still works!
-```
 
-| Function | Returns when there's an open run | Returns after `end_run()` |
-|---|---|---|
-| `mlflow.active_run()` | The current `Run` | **`None`** |
-| `mlflow.last_active_run()` | The current `Run` | The last one (status `FINISHED`) |
+## Project structure
 
-That's the whole difference. `last_active_run()` is the one you call to print the final summary.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-5"></a>
-
-## 5. Project structure
+The project follows the canonical recap layout (see [section 8 of the root README](../README.md#section-8) for the full reference):
 
 ```text
-chap07-mlflow-step-by-step-recap-active-run-and-last-active-run/
-├── README.md
-├── docker-compose.yml
-├── data/
-│   └── red-wine-quality.csv
-├── mlflow/
-│   └── Dockerfile
-└── trainer/
-    ├── Dockerfile
-    ├── requirements.txt
-    └── train.py            ← imperative style + active_run/last_active_run
+chap07-.../
++- README.md                 <- this file
++- docker-compose.yml        <- mlflow + trainer
++- mlflow/
+|  +- Dockerfile             <- mlflow tracking server image
++- data/
+|  +- red-wine-quality.csv
++- trainer/                  <- training service
+   +- Dockerfile
+   +- requirements.txt
+   +- train.py
 ```
 
-Same Docker skeleton as chap 05/f. We drop the shared `myartifacts` volume from chap 06 because today's experiment uses the server's default artifact root.
+## Run it (100% Docker, no Python on the host)
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+This is the **canonical run sequence** for the recap series. It is the same for every chapter from 04 onward; only the trainer arguments change.
 
----
-
-<a id="section-6"></a>
-
-## 6. The code
-
-### 6.1 `trainer/train.py`
-
-```python
-import argparse
-import logging
-import os
-import warnings
-
-import mlflow
-import mlflow.sklearn
-import numpy as np
-import pandas as pd
-from sklearn.linear_model import ElasticNet
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import train_test_split
-
-logging.basicConfig(level=logging.WARN)
-logger = logging.getLogger(__name__)
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--alpha", type=float, required=False, default=0.7)
-parser.add_argument("--l1_ratio", type=float, required=False, default=0.7)
-args = parser.parse_args()
-
-
-def eval_metrics(actual, pred):
-    rmse = np.sqrt(mean_squared_error(actual, pred))
-    mae = mean_absolute_error(actual, pred)
-    r2 = r2_score(actual, pred)
-    return rmse, mae, r2
-
-
-if __name__ == "__main__":
-    warnings.filterwarnings("ignore")
-    np.random.seed(40)
-
-    mlflow.set_tracking_uri(
-        os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-    )
-    print("The set tracking URI is", mlflow.get_tracking_uri())
-
-    exp = mlflow.set_experiment(experiment_name="experiment_2")
-
-    # NEW: print every experiment metadata field
-    print("Name              :", exp.name)
-    print("Experiment_id     :", exp.experiment_id)
-    print("Artifact Location :", exp.artifact_location)
-    print("Tags              :", exp.tags)
-    print("Lifecycle_stage   :", exp.lifecycle_stage)
-    print("Creation timestamp:", exp.creation_time)
-
-    data = pd.read_csv("data/red-wine-quality.csv")
-    train, test = train_test_split(data)
-
-    train_x = train.drop(["quality"], axis=1)
-    test_x = test.drop(["quality"], axis=1)
-    train_y = train[["quality"]]
-    test_y = test[["quality"]]
-
-    alpha, l1_ratio = args.alpha, args.l1_ratio
-
-    # === Imperative style: no `with` ===
-    mlflow.start_run()                                              # NEW (imperative)
-
-    # === active_run() works WHILE the run is open ===
-    current = mlflow.active_run()                                   # NEW
-    print("active_run() during training:", current.info.run_id)
-
-    lr = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42)
-    lr.fit(train_x, train_y)
-    preds = lr.predict(test_x)
-    rmse, mae, r2 = eval_metrics(test_y, preds)
-
-    print("Elasticnet (alpha={:f}, l1_ratio={:f}):".format(alpha, l1_ratio))
-    print("  RMSE: %s" % rmse)
-    print("  MAE:  %s" % mae)
-    print("  R2:   %s" % r2)
-
-    mlflow.log_param("alpha", alpha)
-    mlflow.log_param("l1_ratio", l1_ratio)
-    mlflow.log_metric("rmse", rmse)
-    mlflow.log_metric("r2", r2)
-    mlflow.log_metric("mae", mae)
-    mlflow.sklearn.log_model(lr, "my_new_model_1")
-
-    mlflow.end_run()                                                # NEW (imperative)
-
-    # === active_run() returns None after end_run() ===
-    print("active_run() after end_run():", mlflow.active_run())     # → None
-
-    # === last_active_run() still works (status now FINISHED) ===
-    run = mlflow.last_active_run()                                  # NEW
-    print("Active run id   :", run.info.run_id)
-    print("Active run name :", run.info.run_name)
-    print("Final status    :", run.info.status)
-```
-
-### 6.2 `docker-compose.yml`
-
-```yaml
-services:
-  mlflow:
-    build:
-      context: ./mlflow
-    image: mlops/mlflow-recap:latest
-    container_name: mlflow-recap-07
-    ports:
-      - "5000:5000"
-    volumes:
-      - mlflow-db:/mlflow/database
-      - mlflow-artifacts:/mlflow/mlruns
-    networks:
-      - recap-net
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000').status==200 else 1)"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  trainer:
-    build:
-      context: ./trainer
-    image: mlops/trainer-recap:latest
-    container_name: trainer-recap-07
-    environment:
-      MLFLOW_TRACKING_URI: "http://mlflow:5000"
-    volumes:
-      - ./data:/code/data
-    networks:
-      - recap-net
-    depends_on:
-      mlflow:
-        condition: service_healthy
-
-volumes:
-  mlflow-db:
-  mlflow-artifacts:
-
-networks:
-  recap-net:
-    driver: bridge
-```
-
-### 6.3 `mlflow/Dockerfile`, `trainer/Dockerfile`, `trainer/requirements.txt` — unchanged
-
-Identical to chap 05/f.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-7"></a>
-
-## 7. Run it, observe both helpers
+### 1. Move into the chapter
 
 ```bash
-cd chap07-mlflow-step-by-step-recap-active-run-and-last-active-run
+cd chap07-mlflow-step-by-step-recap...
+```
+
+### 2. Build everything and start the MLflow server in the background
+
+```bash
+docker compose up -d --build mlflow
+```
+
+- `-d` runs the server detached so this terminal stays free for the trainer.
+- `--build` forces a rebuild if any `Dockerfile` or `requirements.txt` changed.
+
+Verify with:
+
+```bash
+docker compose ps
+# mlflow-recap-07    Up X seconds (healthy)
+```
+
+Open [http://localhost:5000](http://localhost:5000). The UI is empty for now (only `Default`) unless you have persistent volumes from a previous chapter.
+
+### 3. Run the trainer (with CLI args)
+
+```bash
+docker compose run --rm trainer --alpha 0.2 --l1_ratio 0.4
+```
+
+### 4. Refresh the MLflow UI
+
+Open / refresh [http://localhost:5000](http://localhost:5000). Expected:
+
+- Experiment: `experiment_3`
+- 1 run in `experiment_3`. Trainer stdout shows the run info object **during** the run and **after** `end_run()`.
+
+> **Chapter quirk.** `mlflow.last_active_run()` returns `None` until at least one run has been opened AND closed in the current process. It is **not** persisted across `docker compose run --rm` invocations.
+
+### 5. Tear down
+
+```bash
+docker compose down       # keep volumes (DB + artifacts survive)
+docker compose down -v    # wipe everything (DB + artifacts + this chapter's named volumes)
+```
+
+## What ends up on your host
+
+This chapter uses **named Docker volumes** rather than host-side bind mounts for the MLflow data:
+
+| Volume | Contents |
+|---|---|
+| `mlflow-db`  | SQLite metadata DB (experiments, runs, registered models) |
+| `mlflow-artifacts` | Pickled models, signatures, plots, CSVs |
+
+
+Inspect them with:
+
+```bash
+docker volume ls | grep recap
+docker volume inspect <volume_name>
+```
+
+These volumes survive `docker compose down`. Only `docker compose down -v` wipes them.
+
+## Recap (bash, one-shot)
+
+```bash
+cd chap07-mlflow-step-by-step-recap...
+
+docker compose up -d --build mlflow
+
+docker compose run --rm trainer --alpha 0.2 --l1_ratio 0.4
+
+# Open http://localhost:5000 and inspect the runs in experiment 'experiment_3'.
+
+docker compose down
+```
+
+## Recap (Windows PowerShell)
+
+```powershell
+cd chap07-mlflow-step-by-step-recap...
+
+docker compose up -d --build mlflow
+
+docker compose run --rm trainer --alpha 0.2 --l1_ratio 0.4
+
+# Open http://localhost:5000 and inspect the runs in experiment 'experiment_3'.
+
+docker compose down
+```
+
+## Enter the trainer container manually (debugging)
+
+Sometimes you want a shell inside the trainer to inspect the filesystem, the env, or to step through the script line by line:
+
+```bash
+docker compose run --rm --entrypoint bash trainer
+# inside:
+#   cat train.py
+#   ls /code/data
+#   env | grep MLFLOW
+#   python train.py --alpha 0.5 --l1_ratio 0.5
+#   exit
+```
+
+The `--entrypoint bash` flag overrides the image's `ENTRYPOINT ["python", "train.py"]` and drops you into a shell instead.
+
+## Troubleshooting
+
+<details>
+<summary><strong>Port 5000 already in use on Windows</strong></summary>
+
+The MLflow server publishes `5000:5000`. If something else is already on port 5000 the container fails to start.
+
+CMD:
+
+```bat
+netstat -ano | findstr :5000
+:: Last column is the PID. Then:
+tasklist | findstr 12345
+taskkill /PID 12345 /F
+```
+
+PowerShell:
+
+```powershell
+Get-NetTCPConnection -LocalPort 5000
+Stop-Process -Id 12345 -Force
+```
+
+Port 5000 is the most common collision (Flask dev servers, AirPlay on macOS, `Hyper-V`, `IIS`, `netbios`, a previous MLflow chapter you forgot to `docker compose down`).
+
+</details>
+
+<details>
+<summary><strong>Docker Desktop frozen / containers stuck in `Created`</strong></summary>
+
+Open **PowerShell as Administrator**:
+
+```powershell
+# 1. Stop Docker Desktop processes
+Get-Process *docker* -ErrorAction SilentlyContinue | Stop-Process -Force
+
+# 2. Stop the Docker service
+Stop-Service com.docker.service -Force -ErrorAction SilentlyContinue
+
+# 3. Force-stop the WSL backend
+wsl --shutdown
+```
+
+Wait 10-15 seconds, then:
+
+```powershell
+Start-Service com.docker.service
+Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+```
+
+If still frozen:
+
+```powershell
+taskkill /F /IM "Docker Desktop.exe"
+taskkill /F /IM "com.docker.backend.exe"
+taskkill /F /IM "com.docker.service.exe"
+taskkill /F /IM "dockerd.exe"
+wsl --shutdown
+```
+
+Then restart Docker Desktop from the Start menu.
+
+</details>
+
+<details>
+<summary><strong>Trainer says `Tracking URI: file:///code/mlruns`</strong></summary>
+
+That means the trainer did NOT see `MLFLOW_TRACKING_URI`. Three places to check:
+
+1. `docker-compose.yml` -> trainer -> `environment: MLFLOW_TRACKING_URI:` is present.
+2. You launched via `docker compose run --rm trainer ...` (not `docker run` directly).
+3. The MLflow service is healthy: `docker compose ps` -> `mlflow-recap-07 ... healthy`.
+
+Override at runtime if needed:
+
+```bash
+docker compose run --rm -e MLFLOW_TRACKING_URI=http://mlflow:5000 trainer --alpha 0.4 --l1_ratio 0.4
+```
+
+</details>
+
+<details>
+<summary><strong>Trainer fails immediately with `Image not found` / `manifest unknown`</strong></summary>
+
+You forgot `--build` or the trainer image is stale.
+
+```bash
+docker compose down
 docker compose up -d --build mlflow
 docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.4
 ```
 
-Output you should see:
-
-```text
-The set tracking URI is http://mlflow:5000
-Name              : experiment_2
-Experiment_id     : 1
-Artifact Location : mlflow-artifacts:/1
-Tags              : {}
-Lifecycle_stage   : active
-Creation timestamp: 1750000000000
-active_run() during training: 8a4f...d1
-Elasticnet (alpha=0.400000, l1_ratio=0.400000):
-  RMSE: 0.78...
-  MAE:  0.62...
-  R2:   0.10...
-active_run() after end_run(): None
-Active run id   : 8a4f...d1
-Active run name : <auto-generated by MLflow>
-Final status    : FINISHED
-```
-
-Open [http://localhost:5000](http://localhost:5000) → experiment **`experiment_2`** → 1 run, status **FINISHED**, with the model `my_new_model_1` in its Artifacts tab.
-
-> [!NOTE]
-> Notice the run got an auto-generated `run_name` (something whimsical like `tasteful-snake-42`). MLflow auto-names runs that don't explicitly receive a `run_name=`. Pass `mlflow.start_run(run_name="my_clean_name")` to take control — that's what we did in chapters 08 and 01.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-8"></a>
-
-## 8. Mini exercise — a deliberate crash
-
-Add a deliberate exception **between** `start_run()` and `end_run()`:
-
-```python
-mlflow.start_run()
-1 / 0   # boom
-mlflow.end_run()
-```
-
-Re-run:
+If `--build` itself fails, prune and retry:
 
 ```bash
-docker compose run --rm trainer
+docker compose down -v
+docker builder prune -af
+docker compose up -d --build mlflow
 ```
 
-In the MLflow UI, open the experiment. The run is there but its **status is `RUNNING`** — forever. That's the imperative-style trap: an exception skipped `end_run()`.
+</details>
 
-To clean it up, manually finalize:
+## Next chapter
 
-```bash
-docker compose run --rm trainer python -c "import os, mlflow; mlflow.set_tracking_uri(os.environ['MLFLOW_TRACKING_URI']); mlflow.end_run()"
-```
-
-…or just use **Style A** (`with mlflow.start_run() as run:`) which closes the run automatically on exception. Lesson learned.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-9"></a>
-
-## 9. Tear down
-
-```bash
-docker compose down       # keep the experiment + runs
-docker compose down -v    # wipe everything
-```
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-10"></a>
-
-## 10. Recap and next chapter
-
-You added two helpers and one new style:
-
-- `mlflow.start_run()` + `mlflow.end_run()` — the imperative style.
-- `mlflow.active_run()` — current run, or `None`.
-- `mlflow.last_active_run()` — most recent run, even after `end_run()`.
-- The full set of **experiment metadata fields**: `name`, `experiment_id`, `artifact_location`, `tags`, `lifecycle_stage`, `creation_time`.
-
-Next: **[Chapter 08](./08-practical-work-mlflow-step-by-step-recap-log-artifacts-with-log-params-and-log-metrics-bulk-versions.md)** — same setup, but we add **`mlflow.log_artifacts(folder)`** to ship train/test CSVs to MLflow, and we switch to the **bulk** versions `log_params(dict)` / `log_metrics(dict)` to log many at once.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<p align="center">
-  <strong>End of Chapter 07 — `active_run` + `last_active_run`</strong><br/>
-  <a href="#top">↑ Back to the top</a>
-</p>
+**Next**: [chap08](../08-practical-work-mlflow-step-by-step-recap-log-artifacts-with-log-params-and-log-metrics-bulk-versions.md) -- switch from `log_param` / `log_metric` to their **bulk** counterparts `log_params(dict)` / `log_metrics(dict)`, and learn `log_artifacts(folder)` to push an entire directory of plots/CSVs/HTML at once.

@@ -1,447 +1,291 @@
-﻿<a id="top"></a>
+﻿# chap08 - Step-by-step recap: `log_artifacts(folder)` and bulk `log_params(dict)` / `log_metrics(dict)`
 
-# Chapter 08 — Step-by-step recap: `log_artifacts(folder)` + bulk `log_params` / `log_metrics` + `get_artifact_uri`
+The full lesson lives at [../08-practical-work-mlflow-step-by-step-recap-log-artifacts-with-log-params-and-log-metrics-bulk-versions.md](../08-practical-work-mlflow-step-by-step-recap-log-artifacts-with-log-params-and-log-metrics-bulk-versions.md).
 
-## Table of Contents
+> **In one line.** This chapter is about how to **collapse N `log_param` / `log_metric` calls into a single bulk call, and push a whole directory of artifacts (plots, CSV exports, raw inputs) with `log_artifacts(folder)` instead of one `log_artifact` per file**.
 
-| # | Section |
-|---|---|
-| 1 | [Objective](#section-1) |
-| 2 | [What we add today vs chap 07](#section-2) |
-| 3 | [What is an artifact?](#section-3) |
-| 4 | [`log_artifact` vs `log_artifacts` vs `log_model`](#section-4) |
-| 5 | [Bulk versions: `log_params` and `log_metrics`](#section-5) |
-| 6 | [Project structure](#section-6) |
-| 7 | [The code](#section-7) |
-| 8 | [Run it, browse the artifacts](#section-8) |
-| 9 | [`get_artifact_uri()` — where do my files actually live?](#section-9) |
-| 10 | [Bonus — quick CLI commands](#section-10) |
-| 11 | [Tear down](#section-11) |
-| 12 | [Recap and next chapter](#section-12) |
 
----
-
-<a id="section-1"></a>
-
-## 1. Objective
-
-Three small but very useful additions today:
-
-- **`mlflow.log_artifacts(folder)`** — log **every file inside a folder** in one call (not just one file).
-- **`mlflow.log_params(dict)`** and **`mlflow.log_metrics(dict)`** — the **bulk** versions of `log_param` / `log_metric`. One call, many entries.
-- **`mlflow.get_artifact_uri()`** — print the storage URI used by the current run, so you can **see where MLflow puts your files**.
-
-The training script also writes the train/test splits to `data/` *before* logging them, demonstrating a realistic workflow: produce → save → log.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-2"></a>
-
-## 2. What we add today vs chap 07
-
-| Diff | What |
-|---|---|
-| Save `train.csv` + `test.csv` to `data/` after `train_test_split` | Realistic intermediate outputs. |
-| Replace `log_param("alpha", ...)` / `log_param("l1_ratio", ...)` with `log_params({...})` | One call, many params. |
-| Replace `log_metric("rmse", ...)` ×3 with `log_metrics({...})` | One call, many metrics. |
-| Add `mlflow.log_artifacts("data/")` | Log the **whole** `data/` folder. |
-| Add `mlflow.get_artifact_uri()` and print it | See **exactly** where the files are stored. |
-| Switch experiment to `experiment_4` | Just to keep this chapter's runs visually separate. |
-
-Everything else (multi-service Docker, env-var URI, imperative `start_run`/`end_run`, `last_active_run` summary) is **unchanged from 07**.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-3"></a>
-
-## 3. What is an artifact?
-
-An **artifact** is **any file** produced by your script that you want to **save and find again** in MLflow.
-
-| Example | Type |
-|---|---|
-| `.csv` | Data table |
-| `.pkl`, `.joblib`, `.onnx` | Serialized ML model |
-| `.png`, `.jpg`, `.svg` | Plot or visualization |
-| `.txt`, `.log`, `.json`, `.html` | Logs / report / dashboard |
-| A whole folder | Multi-file output |
-
-If you can write it to disk, you can log it as an artifact. MLflow groups artifacts under each run, so you always know **which run produced which file**.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-4"></a>
-
-## 4. `log_artifact` vs `log_artifacts` vs `log_model`
-
-| Function | Use it when… | Logs |
-|---|---|---|
-| `mlflow.log_artifact(path)` | You have **one file** to log | That single file |
-| `mlflow.log_artifacts(folder)` | You have **many files in one folder** | Every file inside `folder` (recursive) |
-| `mlflow.<flavor>.log_model(model, path)` | You're saving a **model** (sklearn, pyfunc, …) | The model + a `MLmodel` descriptor + (optionally) a signature & input example |
-
-```python
-mlflow.log_artifact("courbe_apprentissage.png")      # 1 file
-mlflow.log_artifacts("data/")                        # everything in data/
-mlflow.sklearn.log_model(lr, "my_new_model_1")       # the trained model
-```
-
-All three live under the same run's artifact tree in the UI.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-5"></a>
-
-## 5. Bulk versions: `log_params` and `log_metrics`
-
-Same data, half the noise:
-
-```python
-# Before (one-by-one):
-mlflow.log_param("alpha", alpha)
-mlflow.log_param("l1_ratio", l1_ratio)
-mlflow.log_metric("rmse", rmse)
-mlflow.log_metric("r2", r2)
-mlflow.log_metric("mae", mae)
-
-# After (bulk):
-mlflow.log_params({"alpha": alpha, "l1_ratio": l1_ratio})
-mlflow.log_metrics({"rmse": rmse, "r2": r2, "mae": mae})
-```
-
-Functionally identical, but:
-
-- One round-trip to the server instead of N (faster).
-- The dict makes the **set of names** visible at a glance — easier code review.
-- No risk of mixing the wrong value with the wrong name.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-6"></a>
-
-## 6. Project structure
-
-```text
-chap08-mlflow-step-by-step-recap-log-artifacts-and-bulk-log-params-metrics/
-├── README.md
-├── docker-compose.yml
-├── data/
-│   └── red-wine-quality.csv          ← input
-├── mlflow/
-│   └── Dockerfile
-└── trainer/
-    ├── Dockerfile
-    ├── requirements.txt
-    └── train.py                      ← log_artifacts + bulk versions
-```
-
-After running, `data/` will also contain `train.csv` and `test.csv` (written by `train.py`).
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-7"></a>
-
-## 7. The code
-
-### 7.1 `trainer/train.py`
-
-```python
-import argparse
-import logging
-import os
-import warnings
-
-import mlflow
-import mlflow.sklearn
-import numpy as np
-import pandas as pd
-from sklearn.linear_model import ElasticNet
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import train_test_split
-
-logging.basicConfig(level=logging.WARN)
-logger = logging.getLogger(__name__)
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--alpha", type=float, required=False, default=0.7)
-parser.add_argument("--l1_ratio", type=float, required=False, default=0.7)
-args = parser.parse_args()
-
-
-def eval_metrics(actual, pred):
-    rmse = np.sqrt(mean_squared_error(actual, pred))
-    mae = mean_absolute_error(actual, pred)
-    r2 = r2_score(actual, pred)
-    return rmse, mae, r2
-
-
-if __name__ == "__main__":
-    warnings.filterwarnings("ignore")
-    np.random.seed(40)
-
-    mlflow.set_tracking_uri(
-        os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-    )
-    print("The set tracking URI is", mlflow.get_tracking_uri())
-
-    exp = mlflow.set_experiment(experiment_name="experiment_4")
-    print("Name              :", exp.name)
-    print("Experiment_id     :", exp.experiment_id)
-    print("Artifact Location :", exp.artifact_location)
-    print("Tags              :", exp.tags)
-    print("Lifecycle_stage   :", exp.lifecycle_stage)
-    print("Creation timestamp:", exp.creation_time)
-
-    # ===== Load + split + WRITE intermediate files =====
-    data = pd.read_csv("data/red-wine-quality.csv")
-    train, test = train_test_split(data)
-
-    os.makedirs("data", exist_ok=True)                    # idempotent
-    train.to_csv("data/train.csv", index=False)            # NEW
-    test.to_csv("data/test.csv", index=False)              # NEW
-
-    train_x = train.drop(["quality"], axis=1)
-    test_x = test.drop(["quality"], axis=1)
-    train_y = train[["quality"]]
-    test_y = test[["quality"]]
-
-    alpha, l1_ratio = args.alpha, args.l1_ratio
-
-    mlflow.start_run()
-
-    lr = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42)
-    lr.fit(train_x, train_y)
-    preds = lr.predict(test_x)
-    rmse, mae, r2 = eval_metrics(test_y, preds)
-
-    print("Elasticnet (alpha={:f}, l1_ratio={:f}):".format(alpha, l1_ratio))
-    print("  RMSE: %s" % rmse)
-    print("  MAE:  %s" % mae)
-    print("  R2:   %s" % r2)
-
-    # ===== Bulk params & metrics (NEW) =====
-    mlflow.log_params({"alpha": alpha, "l1_ratio": l1_ratio})
-    mlflow.log_metrics({"rmse": rmse, "r2": r2, "mae": mae})
-
-    # ===== Model (same as before) =====
-    mlflow.sklearn.log_model(lr, "my_new_model_1")
-
-    # ===== Folder of artifacts (NEW) =====
-    mlflow.log_artifacts("data/")
-
-    # ===== Where did MLflow put them? (NEW) =====
-    artifacts_uri = mlflow.get_artifact_uri()
-    print("The artifact path is", artifacts_uri)
-
-    mlflow.end_run()
-
-    run = mlflow.last_active_run()
-    print("Active run id   :", run.info.run_id)
-    print("Active run name :", run.info.run_name)
-```
-
-### 7.2 `docker-compose.yml`
-
-Same as 07, only `container_name`s change:
-
-```yaml
-services:
-  mlflow:
-    build: { context: ./mlflow }
-    image: mlops/mlflow-recap:latest
-    container_name: mlflow-recap-08
-    ports:
-      - "5000:5000"
-    volumes:
-      - mlflow-db:/mlflow/database
-      - mlflow-artifacts:/mlflow/mlruns
-    networks: [recap-net]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000').status==200 else 1)"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  trainer:
-    build: { context: ./trainer }
-    image: mlops/trainer-recap:latest
-    container_name: trainer-recap-08
-    environment:
-      MLFLOW_TRACKING_URI: "http://mlflow:5000"
-    volumes:
-      - ./data:/code/data
-    networks: [recap-net]
-    depends_on:
-      mlflow: { condition: service_healthy }
-
-volumes:
-  mlflow-db:
-  mlflow-artifacts:
-
-networks:
-  recap-net:
-    driver: bridge
-```
-
-### 7.3 `mlflow/Dockerfile`, `trainer/Dockerfile`, `trainer/requirements.txt`
-
-Identical to chap 07.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-8"></a>
-
-## 8. Run it, browse the artifacts
-
-```bash
-cd chap08-mlflow-step-by-step-recap-log-artifacts-and-bulk-log-params-metrics
-docker compose up -d --build mlflow
-docker compose run --rm trainer --alpha 0.5 --l1_ratio 0.3
-```
-
-Verify the files were written on your **host** (thanks to the bind mount):
-
-```bash
-ls data/
-# → red-wine-quality.csv  train.csv  test.csv
-```
-
-In the MLflow UI ([http://localhost:5000](http://localhost:5000)):
-
-1. Open experiment **`experiment_4`** → click the latest run.
-2. Tab **Parameters** → `alpha`, `l1_ratio`.
-3. Tab **Metrics** → `rmse`, `r2`, `mae`.
-4. Tab **Artifacts** → tree:
-
-```text
-my_new_model_1/         ← the model (logged by sklearn.log_model)
-  MLmodel
-  conda.yaml
-  model.pkl
-  ...
-red-wine-quality.csv    ← logged by log_artifacts("data/")
-train.csv               ← logged by log_artifacts("data/")
-test.csv                ← logged by log_artifacts("data/")
-```
-
-> [!TIP]
-> Click **`train.csv`** in the artifact tree → MLflow shows a small CSV preview right in the browser. Useful for sanity-checking what you actually shipped.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-9"></a>
-
-## 9. `get_artifact_uri()` — where do my files actually live?
-
-In the trainer's stdout you'll see something like:
-
-```text
-The artifact path is mlflow-artifacts:/2/8a4f...d1/artifacts
-```
-
-Decoded:
-
-- **`mlflow-artifacts:`** — the proxy scheme used by MLflow ≥ 2 when the server stores artifacts itself.
-- **`/2`** — `experiment_id`.
-- **`/8a4f...d1`** — the `run_id`.
-- **`/artifacts`** — the per-run artifact root.
-
-Inside the **`mlflow`** container, those files actually live at `/mlflow/mlruns/2/8a4f...d1/artifacts/`, which is the named volume **`mlflow-artifacts`** declared in the compose file. Want to confirm? Peek inside:
-
-```bash
-docker compose exec mlflow ls /mlflow/mlruns
-docker compose exec mlflow find /mlflow/mlruns -name "*.csv"
-```
-
-> [!NOTE]
-> When MLflow returns `mlflow-artifacts:/...`, **don't** treat it as a path on your host. It's a server-side URI. Use the UI, the CLI (`mlflow artifacts download`), or `MlflowClient` to retrieve files.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-10"></a>
-
-## 10. Bonus — quick CLI commands
-
-The MLflow CLI is just `mlflow` inside a container that has `mlflow` installed. Easiest way: pop a shell in the **trainer** image (no need for a third service):
-
-```bash
-# List experiments
-docker compose run --rm --entrypoint mlflow trainer experiments search
-
-# List runs of an experiment (use the id you saw in the UI)
-docker compose run --rm --entrypoint mlflow trainer runs list --experiment-id 2
-
-# Download just the model from a specific run, into the host's ./data/downloaded/
-docker compose run --rm --entrypoint mlflow trainer artifacts download \
-    --run-id 8a4f...d1 \
-    --artifact-path my_new_model_1 \
-    --dst-path /code/data/downloaded
-```
+## Before you start — Create the host folders!
 
 > [!IMPORTANT]
-> The trainer container already has `MLFLOW_TRACKING_URI=http://mlflow:5000` baked in via the compose `environment:` block, so the CLI talks to the right server without any extra flags.
+> **You MUST create the local folders `database/` and `mlruns/` BEFORE the first `docker compose up`.**
+>
+> This chapter's `docker-compose.yml` uses **bind mounts** (host folders mapped INTO the container), not anonymous Docker volumes. If the host folders don't exist, Docker will silently create them as **empty root-owned directories** that are hard to inspect or clean up from your editor on Windows, and you'll wonder why `mlflow.db` "disappears" when you run `docker compose down -v`.
+>
+> ### Create them now
+> ```bash
+> mkdir database mlruns       # bash / Git Bash / macOS / Linux / WSL
+> ```
+> ```powershell
+> New-Item -ItemType Directory database, mlruns -Force | Out-Null   # PowerShell
+> ```
+>
+> ### What ends up in those folders — and what `working_dir` is for
+>
+> | Host (your laptop, this chapter folder) | Container path (`mlflow` service)   | What lives there                                |
+> | --------------------------------------- | ----------------------------------- | ----------------------------------------------- |
+> | `./database/`                           | `/mlflow/database/`                 | `mlflow.db` — the SQLite tracking store         |
+> | `./mlruns/`                             | `/mlflow/mlruns/`                   | Artifacts: models, plots, metric files          |
+> | `.` (the entire chapter folder)         | `/work/`  ←  this is `working_dir:` | The full project tree: `trainer/`, `data/`, ... |
+>
+> The third mount (`.:/work`) plus `working_dir: /work` is what makes **Docker Desktop → Containers → `mlflow-recap-XX` → Exec → `ls`** show all your project files. Without it, `exec` would drop you in `/mlflow/` and you'd see nothing useful. `working_dir:` is a Docker Compose directive that sets the default cwd for `RUN`, `CMD` and any `docker compose exec` — think of it as `cd /work` baked into the container.
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+## Two ways to launch the training
 
----
+> [!NOTE]
+> **Way A — canonical (one-shot `trainer` container, recommended for the lesson):**
+> ```bash
+> docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> **Way B — via `docker compose exec` inside the running `mlflow` container (Docker Desktop friendly):**
+> ```bash
+> docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> Both run the same `train.py`. Way B works because `mlflow==2.16.2` brings `scikit-learn`, `pandas` and `numpy` as transitive deps. From chap05 onwards, the `MLFLOW_TRACKING_URI` env var is set on the `trainer` service in `docker-compose.yml` and `train.py` reads it via `os.getenv(...)`, so both Way A and Way B "just work" and the runs appear in the MLflow UI under the correct experiment. If a run does NOT appear in the UI, force the URI with: `docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py ...`
 
-<a id="section-11"></a>
+## What is new vs chap07
 
-## 11. Tear down
+- `mlflow.log_params({"alpha": ..., "l1_ratio": ..., "random_state": ...})` -> 1 call instead of N
+- `mlflow.log_metrics({"rmse": ..., "mae": ..., "r2": ...})` -> same idea, idempotent batch insert
+- `mlflow.log_artifacts("local_artifacts/")` -> uploads every file in the folder, preserving subdirs
+- `mlflow.get_artifact_uri()` to print where the run's artifacts physically live
 
-```bash
-docker compose down       # keep volumes (and your runs in the UI)
-docker compose down -v    # nuke volumes + runs + db
+
+## Project structure
+
+The project follows the canonical recap layout (see [section 8 of the root README](../README.md#section-8) for the full reference):
+
+```text
+chap08-.../
++- README.md                 <- this file
++- docker-compose.yml        <- mlflow + trainer
++- mlflow/
+|  +- Dockerfile             <- mlflow tracking server image
++- data/
+|  +- red-wine-quality.csv
++- trainer/                  <- training service
+   +- Dockerfile
+   +- requirements.txt
+   +- train.py
 ```
 
-To also delete the host-side outputs:
+## Run it (100% Docker, no Python on the host)
+
+This is the **canonical run sequence** for the recap series. It is the same for every chapter from 04 onward; only the trainer arguments change.
+
+### 1. Move into the chapter
 
 ```bash
-rm data/train.csv data/test.csv     # PowerShell: Remove-Item data/train.csv,data/test.csv
+cd chap08-mlflow-step-by-step-recap...
 ```
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+### 2. Build everything and start the MLflow server in the background
 
----
+```bash
+docker compose up -d --build mlflow
+```
 
-<a id="section-12"></a>
+- `-d` runs the server detached so this terminal stays free for the trainer.
+- `--build` forces a rebuild if any `Dockerfile` or `requirements.txt` changed.
 
-## 12. Recap and next chapter
+Verify with:
 
-You learned three useful additions:
+```bash
+docker compose ps
+# mlflow-recap-08    Up X seconds (healthy)
+```
 
-| API | Replaces | When to use |
-|---|---|---|
-| `mlflow.log_artifacts(folder)` | Many `log_artifact` calls | A whole folder of outputs |
-| `mlflow.log_params(dict)` / `log_metrics(dict)` | Many `log_param` / `log_metric` calls | When you have several at once |
-| `mlflow.get_artifact_uri()` | (no equivalent) | To **see** where your files were stored |
+Open [http://localhost:5000](http://localhost:5000). The UI is empty for now (only `Default`) unless you have persistent volumes from a previous chapter.
 
-Next: **[Chapter 09](./09-practical-work-mlflow-step-by-step-recap-attaching-metadata-to-runs-with-set-tags.md)** — same setup, but we attach **searchable metadata** to the run with `mlflow.set_tags({...})`, so we can later filter runs by `release.version`, `engineering`, `dataset`, etc.
+### 3. Run the trainer (with CLI args)
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+```bash
+docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.4
+```
 
----
+### 4. Refresh the MLflow UI
 
-<p align="center">
-  <strong>End of Chapter 08 — log_artifacts + bulk log_params/log_metrics</strong><br/>
-  <a href="#top">↑ Back to the top</a>
-</p>
+Open / refresh [http://localhost:5000](http://localhost:5000). Expected:
+
+- Experiment: `experiment_4`
+- 1 run in `experiment_4` containing params/metrics logged in bulk + a full `local_artifacts/` tree under `Artifacts`.
+
+> **Chapter quirk.** `log_artifact(path)` (singular) uploads one file. `log_artifacts(folder)` (plural) uploads the whole folder *content*. Off-by-one-`s` will silently waste your debugging budget.
+
+### 5. Tear down
+
+```bash
+docker compose down       # keep volumes (DB + artifacts survive)
+docker compose down -v    # wipe everything (DB + artifacts + this chapter's named volumes)
+```
+
+## What ends up on your host
+
+This chapter uses **named Docker volumes** rather than host-side bind mounts for the MLflow data:
+
+| Volume | Contents |
+|---|---|
+| `mlflow-db`  | SQLite metadata DB (experiments, runs, registered models) |
+| `mlflow-artifacts` | Pickled models, signatures, plots, CSVs |
+
+
+Inspect them with:
+
+```bash
+docker volume ls | grep recap
+docker volume inspect <volume_name>
+```
+
+These volumes survive `docker compose down`. Only `docker compose down -v` wipes them.
+
+## Recap (bash, one-shot)
+
+```bash
+cd chap08-mlflow-step-by-step-recap...
+
+docker compose up -d --build mlflow
+
+docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.4
+
+# Open http://localhost:5000 and inspect the runs in experiment 'experiment_4'.
+
+docker compose down
+```
+
+## Recap (Windows PowerShell)
+
+```powershell
+cd chap08-mlflow-step-by-step-recap...
+
+docker compose up -d --build mlflow
+
+docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.4
+
+# Open http://localhost:5000 and inspect the runs in experiment 'experiment_4'.
+
+docker compose down
+```
+
+## Enter the trainer container manually (debugging)
+
+Sometimes you want a shell inside the trainer to inspect the filesystem, the env, or to step through the script line by line:
+
+```bash
+docker compose run --rm --entrypoint bash trainer
+# inside:
+#   cat train.py
+#   ls /code/data
+#   env | grep MLFLOW
+#   python train.py --alpha 0.5 --l1_ratio 0.5
+#   exit
+```
+
+The `--entrypoint bash` flag overrides the image's `ENTRYPOINT ["python", "train.py"]` and drops you into a shell instead.
+
+## Troubleshooting
+
+<details>
+<summary><strong>Port 5000 already in use on Windows</strong></summary>
+
+The MLflow server publishes `5000:5000`. If something else is already on port 5000 the container fails to start.
+
+CMD:
+
+```bat
+netstat -ano | findstr :5000
+:: Last column is the PID. Then:
+tasklist | findstr 12345
+taskkill /PID 12345 /F
+```
+
+PowerShell:
+
+```powershell
+Get-NetTCPConnection -LocalPort 5000
+Stop-Process -Id 12345 -Force
+```
+
+Port 5000 is the most common collision (Flask dev servers, AirPlay on macOS, `Hyper-V`, `IIS`, `netbios`, a previous MLflow chapter you forgot to `docker compose down`).
+
+</details>
+
+<details>
+<summary><strong>Docker Desktop frozen / containers stuck in `Created`</strong></summary>
+
+Open **PowerShell as Administrator**:
+
+```powershell
+# 1. Stop Docker Desktop processes
+Get-Process *docker* -ErrorAction SilentlyContinue | Stop-Process -Force
+
+# 2. Stop the Docker service
+Stop-Service com.docker.service -Force -ErrorAction SilentlyContinue
+
+# 3. Force-stop the WSL backend
+wsl --shutdown
+```
+
+Wait 10-15 seconds, then:
+
+```powershell
+Start-Service com.docker.service
+Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+```
+
+If still frozen:
+
+```powershell
+taskkill /F /IM "Docker Desktop.exe"
+taskkill /F /IM "com.docker.backend.exe"
+taskkill /F /IM "com.docker.service.exe"
+taskkill /F /IM "dockerd.exe"
+wsl --shutdown
+```
+
+Then restart Docker Desktop from the Start menu.
+
+</details>
+
+<details>
+<summary><strong>Trainer says `Tracking URI: file:///code/mlruns`</strong></summary>
+
+That means the trainer did NOT see `MLFLOW_TRACKING_URI`. Three places to check:
+
+1. `docker-compose.yml` -> trainer -> `environment: MLFLOW_TRACKING_URI:` is present.
+2. You launched via `docker compose run --rm trainer ...` (not `docker run` directly).
+3. The MLflow service is healthy: `docker compose ps` -> `mlflow-recap-08 ... healthy`.
+
+Override at runtime if needed:
+
+```bash
+docker compose run --rm -e MLFLOW_TRACKING_URI=http://mlflow:5000 trainer --alpha 0.4 --l1_ratio 0.4
+```
+
+</details>
+
+<details>
+<summary><strong>Trainer fails immediately with `Image not found` / `manifest unknown`</strong></summary>
+
+You forgot `--build` or the trainer image is stale.
+
+```bash
+docker compose down
+docker compose up -d --build mlflow
+docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.4
+```
+
+If `--build` itself fails, prune and retry:
+
+```bash
+docker compose down -v
+docker builder prune -af
+docker compose up -d --build mlflow
+```
+
+</details>
+
+## Next chapter
+
+**Next**: [chap09](../09-practical-work-mlflow-step-by-step-recap-attaching-metadata-to-runs-with-set-tags.md) -- attach **searchable metadata** to runs with `mlflow.set_tags({...})` so you can filter the run list by team, branch, dataset, framework version, etc.

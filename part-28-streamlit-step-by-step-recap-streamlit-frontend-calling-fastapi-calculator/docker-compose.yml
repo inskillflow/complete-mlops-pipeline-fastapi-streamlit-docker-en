@@ -1,0 +1,42 @@
+services:
+  fastapi:
+    build:
+      context: ./fastapi
+    image: mlops/fastapi-recap:latest
+    container_name: fastapi-recap-28
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app                          # main.py est visible dans le conteneur (hot reload)
+    working_dir: /app
+    networks:
+      - calc-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  streamlit:
+    build:
+      context: ./streamlit
+    image: mlops/streamlit-recap:latest
+    container_name: streamlit-recap-28
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/front                        # app.py est visible dans le conteneur (hot reload)
+    working_dir: /front
+    environment:
+      - API_URL=http://fastapi:8000     # nom de service Docker -> résolu via le réseau
+    networks:
+      - calc-net
+    depends_on:
+      fastapi:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  calc-net:
+    driver: bridge

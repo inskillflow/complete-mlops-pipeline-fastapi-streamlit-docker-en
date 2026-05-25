@@ -1,0 +1,67 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres-recap-30
+    environment:
+      - POSTGRES_USER=calc
+      - POSTGRES_PASSWORD=calc
+      - POSTGRES_DB=calc
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    networks:
+      - calc-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U calc -d calc"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  fastapi:
+    build:
+      context: ./fastapi
+    image: mlops/fastapi-recap:latest
+    container_name: fastapi-recap-30
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    working_dir: /app
+    environment:
+      - DATABASE_URL=postgresql+psycopg://calc:calc@postgres:5432/calc
+    networks:
+      - calc-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  streamlit:
+    build:
+      context: ./streamlit
+    image: mlops/streamlit-recap:latest
+    container_name: streamlit-recap-30
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/front
+    working_dir: /front
+    environment:
+      - API_URL=http://fastapi:8000
+    networks:
+      - calc-net
+    depends_on:
+      fastapi:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  calc-net:
+    driver: bridge

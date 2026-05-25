@@ -1,497 +1,291 @@
-﻿<a id="top"></a>
+﻿# chap12 - Step-by-step recap: automating logging with `mlflow.autolog()` / `mlflow.sklearn.autolog()`
 
-# Chapter 12 — Step-by-step recap: automating everything with **`mlflow.autolog()`**
+The full lesson lives at [../12-practical-work-mlflow-step-by-step-recap-automating-logging-with-mlflow-autolog.md](../12-practical-work-mlflow-step-by-step-recap-automating-logging-with-mlflow-autolog.md).
 
-## Table of Contents
+> **In one line.** This chapter is about how to **replace half of the manual `log_param` / `log_metric` / `log_model` calls with `mlflow.autolog()`, and watch MLflow infer params, metrics, model artifact, signature, and input example **just by intercepting `.fit()`****.
 
-| # | Section |
-|---|---|
-| 1 | [Objective](#section-1) |
-| 2 | [What we add today vs chap 11](#section-2) |
-| 3 | [What `mlflow.autolog()` actually does](#section-3) |
-| 4 | [Manual vs autolog — side by side](#section-4) |
-| 5 | [`autolog()` vs `mlflow.sklearn.autolog()`](#section-5) |
-| 6 | [Project structure](#section-6) |
-| 7 | [The code](#section-7) |
-| 8 | [Run it, see what landed in the UI for free](#section-8) |
-| 9 | [What autolog **doesn't** do (and how to bridge it)](#section-9) |
-| 10 | [Mini exercise — autolog a Ridge run](#section-10) |
-| 11 | [Tear down](#section-11) |
-| 12 | [Recap and what's next](#section-12) |
 
----
-
-<a id="section-1"></a>
-
-## 1. Objective
-
-Until now, every chapter explicitly called `log_param`, `log_metric`, `log_model`, etc. That's good for learning the pieces — and **tedious** in real projects.
-
-**`mlflow.autolog()`** changes that. Add **one line** before your `.fit()` and MLflow will log:
-
-- All the model's **hyperparameters** (every `__init__` arg, even the defaults you didn't touch).
-- The **training metrics** sklearn computes (e.g. score on the train set).
-- The **fitted model**, with a **signature** and an **input example**.
-- A handful of useful **system tags**.
-
-Today we use it to replace ~30 lines of explicit logging with **one line + one `.fit()`**.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-2"></a>
-
-## 2. What we add today vs chap 11
-
-| Diff | What |
-|---|---|
-| Add `mlflow.autolog(log_input_examples=True)` | The whole automation switch. |
-| Drop `log_params`, `log_metrics`, `log_model` calls | Autolog handles them. |
-| Keep `set_tags(...)` and `log_artifacts("data/")` (or `log_artifact`) | Autolog **doesn't** know about your CSVs or your custom tags. |
-| Switch to ONE experiment `experiment_autolog` with ONE run | Easier to demonstrate the comparison. |
-| Print the run's auto-logged params + metrics from `last_active_run().data` | Show what landed there without us asking. |
-
-Everything else (env-var URI, multi-service Docker, imperative `start_run`/`end_run`, `last_active_run`) is identical to chap 11.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-3"></a>
-
-## 3. What `mlflow.autolog()` actually does
-
-When you call `mlflow.autolog()`, MLflow **monkey-patches** the `.fit()` methods of every supported framework it can find (sklearn, XGBoost, LightGBM, PyTorch, Keras, …). The patched `.fit()`:
-
-1. Detects the **active run** (or starts a new one if there isn't one).
-2. Reads the model's hyperparameters via `model.get_params()` → `mlflow.log_params(...)`.
-3. Records training-time metrics → `mlflow.log_metrics(...)`.
-4. Logs the fitted model with `mlflow.<flavor>.log_model(...)`.
-5. Optionally, infers a **signature** and an **input example** and attaches them.
-
-You only opt out of pieces you don't want, with kwargs:
-
-```python
-mlflow.autolog(
-    log_input_examples=True,    # default: False  → grab the first row(s) as example
-    log_model_signatures=True,  # default: True   → infer Schema from the fit data
-    log_models=True,            # default: True   → include the fitted estimator
-    disable=False,              # set True to turn it off
-    silent=False,               # set True to mute autolog's own logs
-)
-```
+## Before you start — Create the host folders!
 
 > [!IMPORTANT]
-> Autolog **will not** override anything you log manually. If you call `mlflow.log_metric("rmse", x)` and autolog also logged `training_score`, both end up in the run. Same for params. Use this to add the metrics autolog can't compute (validation/test metrics).
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-4"></a>
-
-## 4. Manual vs autolog — side by side
-
-```python
-# ===== Manual (chap 09 style) =====
-mlflow.start_run()
-mlflow.set_tags(COMMON_TAGS)
-lr = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42)
-lr.fit(train_x, train_y)
-preds = lr.predict(test_x)
-rmse, mae, r2 = eval_metrics(test_y, preds)
-mlflow.log_params({"alpha": alpha, "l1_ratio": l1_ratio})
-mlflow.log_metrics({"rmse": rmse, "r2": r2, "mae": mae})
-mlflow.sklearn.log_model(lr, "my_new_model_1")
-mlflow.log_artifact("data/red-wine-quality.csv")
-mlflow.end_run()
-
-# ===== Autolog (today) =====
-mlflow.start_run()
-mlflow.set_tags(COMMON_TAGS)
-mlflow.autolog(log_input_examples=True)
-lr = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42)
-lr.fit(train_x, train_y)
-# (preds + manual eval stay if you want test metrics)
-mlflow.log_artifact("data/red-wine-quality.csv")  # autolog doesn't know about this
-mlflow.end_run()
-```
-
-Same UI result for params and model. Plus, autolog gives you **for free**:
-
-- All sklearn defaults (`fit_intercept`, `selection`, `max_iter`, `precompute`, …).
-- A `training_score`, `training_mean_squared_error`, etc.
-- A model **signature** (input/output schema) and an **input example** (a real row from `train_x`).
-- The system tags `mlflow.autologging` and `mlflow.source.type`.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-5"></a>
-
-## 5. `autolog()` vs `mlflow.sklearn.autolog()`
-
-Two flavours, slightly different scope:
-
-| Function | What it patches |
-|---|---|
-| **`mlflow.autolog()`** | A best-effort superset: scans your environment and patches **every supported framework it finds** (sklearn, XGBoost, LightGBM, PyTorch, TF/Keras, statsmodels, FastAI, Spark MLlib…). |
-| **`mlflow.sklearn.autolog()`** | Only sklearn. Lighter import. Same kwargs as the generic one. |
-
-Both accept the same `log_input_examples=`, `log_model_signatures=`, `log_models=` kwargs.
-
-> [!TIP]
-> Use **framework-specific** autolog (`mlflow.sklearn.autolog()`) in production scripts — it's faster to import and you avoid surprises if another framework you happen to import also has its `.fit()` patched. Use the generic `mlflow.autolog()` for quick exploration.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-6"></a>
-
-## 6. Project structure
-
-```text
-chap12-mlflow-step-by-step-recap-automating-logging-with-mlflow-autolog/
-├── README.md
-├── docker-compose.yml
-├── data/
-│   └── red-wine-quality.csv
-├── mlflow/
-│   └── Dockerfile
-└── trainer/
-    ├── Dockerfile
-    ├── requirements.txt
-    └── train.py            ← + mlflow.autolog(log_input_examples=True)
-```
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-7"></a>
-
-## 7. The code
-
-### 7.1 `trainer/train.py`
-
-```python
-import argparse
-import logging
-import os
-import warnings
-
-import mlflow
-import mlflow.sklearn
-import numpy as np
-import pandas as pd
-from sklearn.linear_model import ElasticNet
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import train_test_split
-
-logging.basicConfig(level=logging.WARN)
-logger = logging.getLogger(__name__)
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--alpha", type=float, required=False, default=0.7)
-parser.add_argument("--l1_ratio", type=float, required=False, default=0.7)
-args = parser.parse_args()
-
-
-def eval_metrics(actual, pred):
-    rmse = np.sqrt(mean_squared_error(actual, pred))
-    mae = mean_absolute_error(actual, pred)
-    r2 = r2_score(actual, pred)
-    return rmse, mae, r2
-
-
-if __name__ == "__main__":
-    warnings.filterwarnings("ignore")
-    np.random.seed(40)
-
-    mlflow.set_tracking_uri(
-        os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-    )
-    print("The set tracking URI is", mlflow.get_tracking_uri())
-
-    exp = mlflow.set_experiment(experiment_name="experiment_autolog")
-    print(f"Name              : {exp.name}")
-    print(f"Experiment_id     : {exp.experiment_id}")
-    print(f"Artifact Location : {exp.artifact_location}")
-
-    data = pd.read_csv("data/red-wine-quality.csv")
-    train, test = train_test_split(data)
-
-    os.makedirs("data", exist_ok=True)
-    train.to_csv("data/train.csv", index=False)
-    test.to_csv("data/test.csv", index=False)
-
-    train_x = train.drop(["quality"], axis=1)
-    test_x = test.drop(["quality"], axis=1)
-    train_y = train[["quality"]]
-    test_y = test[["quality"]]
-
-    alpha, l1_ratio = args.alpha, args.l1_ratio
-
-    mlflow.start_run()
-
-    mlflow.set_tags({
-        "engineering":       "ML platform",
-        "release.candidate": "RC1",
-        "release.version":   "2.0",
-    })
-
-    # ===== THE WHOLE POINT OF THIS CHAPTER =====
-    mlflow.autolog(log_input_examples=True)
-
-    # No more log_param / log_metric / log_model in this section!
-    lr = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42)
-    lr.fit(train_x, train_y)            # autolog records params + model + signature
-
-    # Test-set metrics: autolog doesn't compute these, so do them manually
-    preds = lr.predict(test_x)
-    rmse, mae, r2 = eval_metrics(test_y, preds)
-    print(f"  RMSE={rmse:.4f}  MAE={mae:.4f}  R2={r2:.4f}")
-    mlflow.log_metrics({"test_rmse": rmse, "test_r2": r2, "test_mae": mae})
-
-    # Autolog ignores arbitrary files; log the input CSV by hand
-    mlflow.log_artifact("data/red-wine-quality.csv")
-
-    print("Artifact path:", mlflow.get_artifact_uri())
-    mlflow.end_run()
-
-    run = mlflow.last_active_run()
-    print(f"\nActive run id   : {run.info.run_id}")
-    print(f"Active run name : {run.info.run_name}")
-
-    print("\n--- Auto-logged PARAMS (subset) ---")
-    for k in sorted(run.data.params)[:8]:        # show first 8 to keep it short
-        print(f"  {k} = {run.data.params[k]}")
-    print(f"  ... ({len(run.data.params)} params in total)")
-
-    print("\n--- Auto-logged METRICS ---")
-    for k, v in run.data.metrics.items():
-        print(f"  {k} = {v}")
-```
-
-### 7.2 `docker-compose.yml`
-
-Same skeleton as 10/k, only `container_name`s change:
-
-```yaml
-services:
-  mlflow:
-    build: { context: ./mlflow }
-    image: mlops/mlflow-recap:latest
-    container_name: mlflow-recap-12
-    ports:
-      - "5000:5000"
-    volumes:
-      - mlflow-db:/mlflow/database
-      - mlflow-artifacts:/mlflow/mlruns
-    networks: [recap-net]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000').status==200 else 1)"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  trainer:
-    build: { context: ./trainer }
-    image: mlops/trainer-recap:latest
-    container_name: trainer-recap-12
-    environment:
-      MLFLOW_TRACKING_URI: "http://mlflow:5000"
-    volumes:
-      - ./data:/code/data
-    networks: [recap-net]
-    depends_on:
-      mlflow: { condition: service_healthy }
-
-volumes:
-  mlflow-db:
-  mlflow-artifacts:
-
-networks:
-  recap-net:
-    driver: bridge
-```
-
-### 7.3 `mlflow/Dockerfile`, `trainer/Dockerfile`, `trainer/requirements.txt`
-
-Identical to chap 10/k.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-8"></a>
-
-## 8. Run it, see what landed in the UI for free
-
-```bash
-cd chap12-mlflow-step-by-step-recap-automating-logging-with-mlflow-autolog
-docker compose up -d --build mlflow
-docker compose run --rm trainer --alpha 0.7 --l1_ratio 0.7
-```
-
-Trainer's stdout (truncated):
-
-```text
-The set tracking URI is http://mlflow:5000
-Name              : experiment_autolog
-Experiment_id     : 1
-2026/05/04 20:44:01 INFO mlflow.tracking.fluent: Autologging successfully enabled for sklearn.
-  RMSE=0.7800  MAE=0.6200  R2=0.1000
-Artifact path: mlflow-artifacts:/1/8a4f...d1/artifacts
-
-Active run id   : 8a4f...d1
-Active run name : agreeable-eel-19
-
---- Auto-logged PARAMS (subset) ---
-  alpha = 0.7
-  copy_X = True
-  fit_intercept = True
-  l1_ratio = 0.7
-  max_iter = 1000
-  positive = False
-  precompute = False
-  random_state = 42
-  ... (12 params in total)
-
---- Auto-logged METRICS ---
-  training_score = 0.27...
-  training_mean_squared_error = 0.55...
-  training_mean_absolute_error = 0.59...
-  training_r2_score = 0.27...
-  training_root_mean_squared_error = 0.74...
-  test_rmse = 0.78
-  test_r2 = 0.10
-  test_mae = 0.62
-```
-
-Notice **two batches of metrics**: the `training_*` ones came from autolog; the `test_*` ones from our manual `log_metrics`.
-
-In the UI ([http://localhost:5000](http://localhost:5000)), open **`experiment_autolog`** → the run:
-
-- **Parameters** tab → all **12** ElasticNet hyperparameters (not just the 2 we cared about).
-- **Metrics** tab → the `training_*` set + our `test_*` set.
-- **Artifacts** tab:
-  - `model/` (the auto-logged model with `MLmodel`, `conda.yaml`, `model.pkl`, **`signature.json`**, **`input_example.json`**)
-  - `red-wine-quality.csv` (our manual `log_artifact`)
-- **Tags** tab → our 3 custom tags + `mlflow.autologging = sklearn` + the usual `mlflow.user`, `mlflow.source.*`.
-
-Click on **`model/input_example.json`** in the UI → MLflow shows the **first row** of `train_x` it captured. That single row is enough for downstream tooling to know the model's input schema.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-9"></a>
-
-## 9. What autolog **doesn't** do (and how to bridge it)
-
-| Limitation | Workaround |
-|---|---|
-| **Test/validation metrics** are not computed | Compute them yourself + `mlflow.log_metrics({"test_rmse": ...})` (we do exactly this in the chapter). |
-| **Custom artifacts** (CSVs, plots, configs) are ignored | Call `mlflow.log_artifact(path)` or `log_artifacts(folder)` explicitly. |
-| **Custom tags** must still be set manually | `mlflow.set_tags({...})` (we keep them). |
-| **Multiple `.fit()` calls in the same run** stack their logs | If you cross-validate or fit twice, you'll get duplicate metric histories. Wrap each in its own `start_run()` (or use `nested=True`). |
-| **Some frameworks log gigabytes** (e.g. autolog for Keras records every batch) | Tune the `every_n_iter=` kwarg on the framework-specific autolog, or `disable=True` for that framework. |
+> **You MUST create the local folders `database/` and `mlruns/` BEFORE the first `docker compose up`.**
+>
+> This chapter's `docker-compose.yml` uses **bind mounts** (host folders mapped INTO the container), not anonymous Docker volumes. If the host folders don't exist, Docker will silently create them as **empty root-owned directories** that are hard to inspect or clean up from your editor on Windows, and you'll wonder why `mlflow.db` "disappears" when you run `docker compose down -v`.
+>
+> ### Create them now
+> ```bash
+> mkdir database mlruns       # bash / Git Bash / macOS / Linux / WSL
+> ```
+> ```powershell
+> New-Item -ItemType Directory database, mlruns -Force | Out-Null   # PowerShell
+> ```
+>
+> ### What ends up in those folders — and what `working_dir` is for
+>
+> | Host (your laptop, this chapter folder) | Container path (`mlflow` service)   | What lives there                                |
+> | --------------------------------------- | ----------------------------------- | ----------------------------------------------- |
+> | `./database/`                           | `/mlflow/database/`                 | `mlflow.db` — the SQLite tracking store         |
+> | `./mlruns/`                             | `/mlflow/mlruns/`                   | Artifacts: models, plots, metric files          |
+> | `.` (the entire chapter folder)         | `/work/`  ←  this is `working_dir:` | The full project tree: `trainer/`, `data/`, ... |
+>
+> The third mount (`.:/work`) plus `working_dir: /work` is what makes **Docker Desktop → Containers → `mlflow-recap-XX` → Exec → `ls`** show all your project files. Without it, `exec` would drop you in `/mlflow/` and you'd see nothing useful. `working_dir:` is a Docker Compose directive that sets the default cwd for `RUN`, `CMD` and any `docker compose exec` — think of it as `cd /work` baked into the container.
+
+## Two ways to launch the training
 
 > [!NOTE]
-> A common confusion: **autolog must be enabled BEFORE `.fit()`**. If you call `mlflow.autolog()` *after* the model fit, nothing happens. Put it as early as possible in the script (top of `main()` is fine).
+> **Way A — canonical (one-shot `trainer` container, recommended for the lesson):**
+> ```bash
+> docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> **Way B — via `docker compose exec` inside the running `mlflow` container (Docker Desktop friendly):**
+> ```bash
+> docker compose exec mlflow python trainer/train.py --alpha 0.1 --l1_ratio 0.1
+> ```
+>
+> Both run the same `train.py`. Way B works because `mlflow==2.16.2` brings `scikit-learn`, `pandas` and `numpy` as transitive deps. From chap05 onwards, the `MLFLOW_TRACKING_URI` env var is set on the `trainer` service in `docker-compose.yml` and `train.py` reads it via `os.getenv(...)`, so both Way A and Way B "just work" and the runs appear in the MLflow UI under the correct experiment. If a run does NOT appear in the UI, force the URI with: `docker compose exec -e MLFLOW_TRACKING_URI=http://localhost:5000 mlflow python trainer/train.py ...`
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+## What is new vs chap11
 
----
+- `mlflow.autolog()` at the top of the script -> autolog every supported framework (sklearn, xgboost, pytorch, ...)
+- `mlflow.sklearn.autolog()` for finer control (turn on/off `log_models`, `log_input_examples`, etc.)
+- Compare the auto-logged keys against your manual list: any deltas are bugs in YOUR previous code
+- Override autolog: you can still add custom `log_param` / `log_metric` / `set_tag` calls on top
 
-<a id="section-10"></a>
 
-## 10. Mini exercise — autolog a Ridge run
+## Project structure
 
-Replace the model in `train.py`:
+The project follows the canonical recap layout (see [section 8 of the root README](../README.md#section-8) for the full reference):
 
-```python
-from sklearn.linear_model import Ridge
-
-# ...
-mlflow.autolog(log_input_examples=True)
-
-lr = Ridge(alpha=alpha, random_state=42)
-lr.fit(train_x, train_y)
+```text
+chap12-.../
++- README.md                 <- this file
++- docker-compose.yml        <- mlflow + trainer
++- mlflow/
+|  +- Dockerfile             <- mlflow tracking server image
++- data/
+|  +- red-wine-quality.csv
++- trainer/                  <- training service
+   +- Dockerfile
+   +- requirements.txt
+   +- train.py
 ```
 
-Re-run:
+## Run it (100% Docker, no Python on the host)
+
+This is the **canonical run sequence** for the recap series. It is the same for every chapter from 04 onward; only the trainer arguments change.
+
+### 1. Move into the chapter
 
 ```bash
-docker compose run --rm trainer --alpha 0.5
+cd chap12-mlflow-step-by-step-recap...
 ```
 
-In the UI:
-
-- **Parameters** → all of `Ridge`'s defaults (`solver`, `tol`, `fit_intercept`, …) — you didn't write a single `log_param` for them.
-- **Artifacts → model/MLmodel** → it now says `loader_module: mlflow.sklearn` with the right Python class name.
-
-Same train script, totally different model — autolog adapts.
-
-<p align="right"><a href="#top">↑ Back to top</a></p>
-
----
-
-<a id="section-11"></a>
-
-## 11. Tear down
+### 2. Build everything and start the MLflow server in the background
 
 ```bash
-docker compose down       # keep volumes
-docker compose down -v    # wipe everything
+docker compose up -d --build mlflow
 ```
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+- `-d` runs the server detached so this terminal stays free for the trainer.
+- `--build` forces a rebuild if any `Dockerfile` or `requirements.txt` changed.
 
----
+Verify with:
 
-<a id="section-12"></a>
+```bash
+docker compose ps
+# mlflow-recap-12    Up X seconds (healthy)
+```
 
-## 12. Recap and what's next
+Open [http://localhost:5000](http://localhost:5000). The UI is empty for now (only `Default`) unless you have persistent volumes from a previous chapter.
 
-You now have, in your toolbox, **every essential MLflow building block** + the automation shortcut:
+### 3. Run the trainer (with CLI args)
 
-| Concept | Chapter |
+```bash
+docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.5
+```
+
+### 4. Refresh the MLflow UI
+
+Open / refresh [http://localhost:5000](http://localhost:5000). Expected:
+
+- Experiment: `experiment_autolog`
+- 1 run with **many** auto-logged params/metrics + `model/` artifact + signature + input_example, none of which you wrote by hand.
+
+> **Chapter quirk.** Autolog hooks `BaseEstimator.fit`. If you train through a non-standard wrapper that bypasses `.fit()`, autolog stays silent. Always print `mlflow.last_active_run().data` to confirm it actually fired.
+
+### 5. Tear down
+
+```bash
+docker compose down       # keep volumes (DB + artifacts survive)
+docker compose down -v    # wipe everything (DB + artifacts + this chapter's named volumes)
+```
+
+## What ends up on your host
+
+This chapter uses **named Docker volumes** rather than host-side bind mounts for the MLflow data:
+
+| Volume | Contents |
 |---|---|
-| `set_tracking_uri` + first run | 01 |
-| `get_tracking_uri` | 02 |
-| Full ElasticNet pipeline | 03 |
-| Containerized trainer (with bug) | 04 |
-| Fix bug via `MLFLOW_TRACKING_URI` env var | 05 |
-| `create_experiment` + custom artifact location + shared volume | 06 |
-| `active_run` / `last_active_run` + imperative `start_run`/`end_run` | 07 |
-| `log_artifacts` + bulk `log_params` / `log_metrics` + `get_artifact_uri` | 08 |
-| `set_tags` for searchable metadata | 09 |
-| Multiple **runs** in one experiment (helper + `for` loop) | 10 |
-| Multiple **experiments** (model factories) | 11 |
-| **`mlflow.autolog()`** to automate logging | **12** ← you are here |
+| `mlflow-db`  | SQLite metadata DB (experiments, runs, registered models) |
+| `mlflow-artifacts` | Pickled models, signatures, plots, CSVs |
 
-Next: **[Chapter 13](./13-practical-work-mlflow-step-by-step-recap-postgresql-backend-store-and-s3-artifacts.md)** — move from the SQLite + local-folder setup to a **PostgreSQL backend store + S3 artifact store**, the production-grade configuration any team would actually run.
 
-What's left on the main recap track:
+Inspect them with:
 
-- **Chapter 14** — model **signature + input example** (manual control over what autolog generates here).
-- **Chapter 16** — `mlflow.pyfunc.PythonModel` to ship custom inference logic alongside an sklearn model.
-- **Chapter 23** — the **Model Registry** + `MlflowClient` to version, stage and promote models.
-- **Chapter 26b** — the MLflow **CLI** as a separate Docker service for cleanup, exports and audits.
+```bash
+docker volume ls | grep recap
+docker volume inspect <volume_name>
+```
 
-You have all the prerequisites for any of those — pick the one that solves the next real problem in your project.
+These volumes survive `docker compose down`. Only `docker compose down -v` wipes them.
 
-<p align="right"><a href="#top">↑ Back to top</a></p>
+## Recap (bash, one-shot)
 
----
+```bash
+cd chap12-mlflow-step-by-step-recap...
 
-<p align="center">
-  <strong>End of Chapter 12 — automating logging with mlflow.autolog</strong><br/>
-  <a href="#top">↑ Back to the top</a>
-</p>
+docker compose up -d --build mlflow
+
+docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.5
+
+# Open http://localhost:5000 and inspect the runs in experiment 'experiment_autolog'.
+
+docker compose down
+```
+
+## Recap (Windows PowerShell)
+
+```powershell
+cd chap12-mlflow-step-by-step-recap...
+
+docker compose up -d --build mlflow
+
+docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.5
+
+# Open http://localhost:5000 and inspect the runs in experiment 'experiment_autolog'.
+
+docker compose down
+```
+
+## Enter the trainer container manually (debugging)
+
+Sometimes you want a shell inside the trainer to inspect the filesystem, the env, or to step through the script line by line:
+
+```bash
+docker compose run --rm --entrypoint bash trainer
+# inside:
+#   cat train.py
+#   ls /code/data
+#   env | grep MLFLOW
+#   python train.py --alpha 0.5 --l1_ratio 0.5
+#   exit
+```
+
+The `--entrypoint bash` flag overrides the image's `ENTRYPOINT ["python", "train.py"]` and drops you into a shell instead.
+
+## Troubleshooting
+
+<details>
+<summary><strong>Port 5000 already in use on Windows</strong></summary>
+
+The MLflow server publishes `5000:5000`. If something else is already on port 5000 the container fails to start.
+
+CMD:
+
+```bat
+netstat -ano | findstr :5000
+:: Last column is the PID. Then:
+tasklist | findstr 12345
+taskkill /PID 12345 /F
+```
+
+PowerShell:
+
+```powershell
+Get-NetTCPConnection -LocalPort 5000
+Stop-Process -Id 12345 -Force
+```
+
+Port 5000 is the most common collision (Flask dev servers, AirPlay on macOS, `Hyper-V`, `IIS`, `netbios`, a previous MLflow chapter you forgot to `docker compose down`).
+
+</details>
+
+<details>
+<summary><strong>Docker Desktop frozen / containers stuck in `Created`</strong></summary>
+
+Open **PowerShell as Administrator**:
+
+```powershell
+# 1. Stop Docker Desktop processes
+Get-Process *docker* -ErrorAction SilentlyContinue | Stop-Process -Force
+
+# 2. Stop the Docker service
+Stop-Service com.docker.service -Force -ErrorAction SilentlyContinue
+
+# 3. Force-stop the WSL backend
+wsl --shutdown
+```
+
+Wait 10-15 seconds, then:
+
+```powershell
+Start-Service com.docker.service
+Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+```
+
+If still frozen:
+
+```powershell
+taskkill /F /IM "Docker Desktop.exe"
+taskkill /F /IM "com.docker.backend.exe"
+taskkill /F /IM "com.docker.service.exe"
+taskkill /F /IM "dockerd.exe"
+wsl --shutdown
+```
+
+Then restart Docker Desktop from the Start menu.
+
+</details>
+
+<details>
+<summary><strong>Trainer says `Tracking URI: file:///code/mlruns`</strong></summary>
+
+That means the trainer did NOT see `MLFLOW_TRACKING_URI`. Three places to check:
+
+1. `docker-compose.yml` -> trainer -> `environment: MLFLOW_TRACKING_URI:` is present.
+2. You launched via `docker compose run --rm trainer ...` (not `docker run` directly).
+3. The MLflow service is healthy: `docker compose ps` -> `mlflow-recap-12 ... healthy`.
+
+Override at runtime if needed:
+
+```bash
+docker compose run --rm -e MLFLOW_TRACKING_URI=http://mlflow:5000 trainer --alpha 0.4 --l1_ratio 0.4
+```
+
+</details>
+
+<details>
+<summary><strong>Trainer fails immediately with `Image not found` / `manifest unknown`</strong></summary>
+
+You forgot `--build` or the trainer image is stale.
+
+```bash
+docker compose down
+docker compose up -d --build mlflow
+docker compose run --rm trainer --alpha 0.4 --l1_ratio 0.4
+```
+
+If `--build` itself fails, prune and retry:
+
+```bash
+docker compose down -v
+docker builder prune -af
+docker compose up -d --build mlflow
+```
+
+</details>
+
+## Next chapter
+
+**Next**: [chap13](../13-practical-work-mlflow-step-by-step-recap-postgresql-backend-store-and-s3-artifacts.md) -- move from the SQLite + local-folder dev setup to a production-grade **PostgreSQL backend store + S3 artifact store**, all in `docker-compose.yml`.
