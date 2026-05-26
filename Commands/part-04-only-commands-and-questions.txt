@@ -1,0 +1,41 @@
+
+-------------------------
+==> COMMANDS
+-------------------------
+
+01 - git clone https://github.com/inskillflow/complete-mlops-pipeline-fastapi-streamlit-docker-en.git
+02 - cd .\complete-mlops-pipeline-fastapi-streamlit-docker-en\
+03 - cd .\part-04-mlflow-step-by-step-recap-running-the-training-in-docker\
+04 - pwd 
+05 - Instruction 1(This is not a command) : Before continuing, open Docker Desktop and wait until it is fully running. 
+06 - docker --version
+07 - docker compose version
+08 - docker ps
+09 - docker compose up -d --build mlflow
+10 - docker ps
+11 - docker compose run --rm trainer --alpha 0.1 --l1_ratio 0.1
+12 - docker compose run --rm trainer --alpha 0.5 --l1_ratio 0.5
+13 - docker compose run --rm trainer --alpha 0.9 --l1_ratio 0.1
+14 - Instruction 2 (Not a command): Open http://localhost:5000/ in your browser and check whether the MLflow experiments are displayed.
+15 - Instruction 3 (Not a command): The experiments are not displayed in MLflow. Explain why.
+16 - docker compose down 
+17 - docker stop $(docker ps -a -q)
+18 - docker rm $(docker ps -a -q)
+19 - docker compose -f docker-compose-option2.yml up -d --build
+20 - docker compose -f docker-compose-option2.yml run --rm trainer --alpha 0.1 --l1_ratio 0.1
+21 - docker compose -f docker-compose-option2.yml run --rm trainer --alpha 0.5 --l1_ratio 0.5
+22 - docker compose -f docker-compose-option2.yml run --rm trainer --alpha 0.9 --l1_ratio 0.1
+23 - Instruction 4 (This is not a command): Open your browser and go to http://localhost:5000/. Observe the MLflow interface and check whether the experiments are now visible.
+24 - Instruction 5 (This is not a command): Are the experiments showing now? Explain what was wrong in the original docker-compose.yml file and why the corrected version fixes the problem.
+25 - docker compose -f docker-compose-option2.yml down
+
+
+-----------------------------------------------
+==> USEFUL COMMANDS FOR TROUBELSHOOTING
+-----------------------------------------------
+docker compose down
+docker ps -a 
+docker stop $(docker ps -a -q)
+docker rm $(docker ps -a -q)
+docker ps -a 
+docker compose up -d --build mlflow
