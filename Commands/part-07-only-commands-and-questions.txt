@@ -1,0 +1,151 @@
+
+docker compose down
+cd ..
+cd .\part-07-mlflow-step-by-step-recap-active-run-and-last-active-run\
+(JUST HIT TAB MANY TIMES)
+
+-------------------------
+==> COMMANDS
+-------------------------
+
+01 - git clone https://github.com/inskillflow/complete-mlops-pipeline-fastapi-streamlit-docker-en.git
+02 - cd .\complete-mlops-pipeline-fastapi-streamlit-docker-en\
+03 - cd .\part-07-mlflow-step-by-step-recap-active-run-and-last-active-run\
+04 - pwd 
+05 - Instruction 1(This is not a command) : Before continuing, open Docker Desktop and wait until it is fully running. 
+06 - docker --version
+07 - docker compose version
+08 - docker ps
+09 - docker ps -a
+10 - docker compose up -d --build mlflow
+11 - docker compose run --rm trainer --alpha 0.2 --l1_ratio 0.4
+12 - # Open http://localhost:5000 and inspect the runs in experiment 'experiment_3'.
+
+13 - Go inside the container and execute the following comands : 
+
+docker compose run --rm --entrypoint bash trainer
+# inside:
+#   ls 
+#   cd trainer
+#   cat train.py
+#   cd ..
+#   ls 
+#   cd data
+#   ls
+#   cd ..
+#   env | grep -i python
+#   python /work/trainer/train.py --alpha 0.5 --l1_ratio 0.5
+#   Analys the logs ..do you see those 3 lines 
+=========> active_run() after end_run(): None
+=========> Active run id   : 36d734fb10a14235839ffac7f4cf20c2
+=========> Active run name : caring-stag-712
+=========> Final status    : FINISHED
+#   exit
+docker compose down 
+
+
+
+
+
+
+
+
+------------------------------------
+===>  Questions
+------------------------------------
+
+01. What are `mlflow.start_run()` and `mlflow.end_run()` used for?
+02. What is the role of `mlflow.active_run()` during execution?
+03. What is the role of `mlflow.last_active_run()` after the execution is finished?
+04. Why should the results appear in the MLflow interface at `http://localhost:5000`?
+
+
+
+------------------------------------
+===> Answers:
+------------------------------------
+
+01. What are `mlflow.start_run()` and `mlflow.end_run()` used for?
+
+`mlflow.start_run()` is used to start a new MLflow run.  
+A run represents one execution of the training script.
+
+Inside this run, we can log information such as:
+
+- parameters
+- metrics
+- models
+- artifacts
+- run information
+
+`mlflow.end_run()` is used to close the run properly.  
+It tells MLflow that the experiment execution is finished.
+
+So, `start_run()` opens the tracking session, and `end_run()` closes it.
+
+---
+
+02. What is the role of `mlflow.active_run()` during execution?
+
+`mlflow.active_run()` is used to check the run that is currently open.
+
+During the execution of the script, it allows us to inspect the active MLflow run and access information such as:
+
+- the run ID
+- the experiment ID
+- the run status
+- the current run metadata
+
+It is useful for debugging because it confirms that MLflow is currently tracking the training execution.
+
+---
+
+03. What is the role of `mlflow.last_active_run()` after the execution is finished?
+
+`mlflow.last_active_run()` is used after the run has been closed.
+
+It gives access to the last MLflow run that was active in the current Python process.
+
+This is useful to verify what run was just executed after calling `mlflow.end_run()`.
+
+However, it is important to understand that `last_active_run()` is not the same as the MLflow UI or the MLflow database. It only remembers the last active run inside the current execution process.
+
+---
+
+04. Why should the results appear in the MLflow interface at `http://localhost:5000`?
+
+The results should appear in the MLflow interface because the training script sends its parameters, metrics, and artifacts to the MLflow tracking server.
+
+The page `http://localhost:5000` is the web interface of the MLflow server.
+
+If the experiment appears there, it means that:
+
+- the MLflow server is running correctly
+- the trainer container communicated correctly with MLflow
+- the tracking URI is correctly configured
+- the run was successfully logged
+- the experiment can now be inspected, compared, and debugged visually
+
+In simple terms: the MLflow UI is where we verify that the experiment was really tracked.
+
+
+
+SO :
+
+- `start_run()` starts a new MLflow experiment run.  
+- `end_run()` closes it properly.
+- `active_run()` shows the run currently being executed.
+- `last_active_run()` shows the last run after it has finished.
+- Results appear at `http://localhost:5000` to confirm that MLflow received and saved the experiment data.
+
+In other terms: 
+
+- `start_run()` starts the recording.
+- `end_run()` stops and saves the recording.
+- `active_run()` shows the recording currently in progress.
+- Together, they help MLflow keep experiments organized.
+
+In the long term, MLflow helps us keep a clear history of all Machine Learning experiments.
+Instead of losing results after each training, MLflow saves the parameters, metrics, artifacts, and runs.
+This makes it easier to compare models, debug problems, reproduce results, and choose the best version later.
+In simple terms: MLflow helps us remember what we tested, what worked, and what did not.
