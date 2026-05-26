@@ -1,0 +1,130 @@
+
+docker compose down
+docker ps 
+docker ps -a 
+cd ..
+cd .\part-10-mlflow-step-by-step-recap-multiple-runs-in-one-experiment\
+(JUST HIT TAB MANY TIMES)
+
+-------------------------
+==> COMMANDS
+-------------------------
+
+01 - git clone https://github.com/inskillflow/complete-mlops-pipeline-fastapi-streamlit-docker-en.git
+02 - cd .\complete-mlops-pipeline-fastapi-streamlit-docker-en\
+03 - cd .\part-10-mlflow-step-by-step-recap-multiple-runs-in-one-experiment\
+04 - pwd 
+05 - Instruction 1(This is not a command) : Before continuing, open Docker Desktop and wait until it is fully running. 
+06 - docker --version
+07 - docker compose version
+08 - docker ps
+09 - docker ps -a
+10 - docker stop $(docker ps -a -q)
+11 - docker rm $(docker ps -a -q)
+12 - docker ps
+13 - docker ps -a
+14 - docker compose up -d --build mlflow
+15 - docker compose run --rm trainer --alpha 0.7 --l1_ratio 0.7 (NOT WORKING , GO directly to 17)
+16 - # Open http://localhost:5000 and inspect the runs in experiment 'experiment_3'.
+
+
+
+
+
+17 - Go inside the container and execute the following comands : 
+
+docker compose run --rm --entrypoint bash trainer
+Otherwise : 
+docker ps ==> to get the id 
+docker exec -it <id> bash
+
+# inside:
+#   ls 
+#   cd trainer
+#   cat train.py
+#   cd ..
+#   ls 
+#   cd data
+#   ls
+#   cd ..
+#   env | grep -i python
+#   python /work/trainer/train.py --alpha 0.5 --l1_ratio 0.5
+#   Analys the logs ..do you see those 3 lines 
+
+
+
+#   exit
+docker compose down 
+
+
+
+
+------------------------------
+## Question
+------------------------------
+
+Analyse this file train.py : 
+
+https://github.com/inskillflow/complete-mlops-pipeline-fastapi-streamlit-docker-en/blob/main/part-10-mlflow-step-by-step-recap-multiple-runs-in-one-experiment/trainer/train.py
+
+
+What is new in this version of the MLflow script?
+
+In the previous versions, we executed one training run.  
+In this version, the script executes multiple MLflow runs.
+
+Identify in the code:
+
+1. Where the multiple runs are defined.
+2. How each run is named.
+3. Which part of the code repeats the training several times.
+4. How MLflow separates the results of `run1.1`, `run2.1`, and `run3.1`.
+
+Explain why running multiple runs is useful when comparing Machine Learning experiments.
+
+------------------------------
+# Answers : 
+------------------------------
+
+- The new thing is that the script runs multiple MLflow experiments in one execution.
+- The multiple runs are defined in the `CONFIGS` list:
+- `run1.1`, `run2.1`, and `run3.1`.
+- The `for` loop goes through this list and calls `train_one_run()` for each configuration.
+- Each run gets a different name and can have different parameters such as `alpha` and `l1_ratio`.
+- MLflow separates the results of each run, so we can compare their metrics, parameters, models, and artifacts later in the MLflow UI.
+
+In simple terms: this script does not test one model configuration only. 
+It tests several configurations and saves each one as a separate MLflow run.
+
+
+
+
+--------------------------------------
+## Question 2
+--------------------------------------
+
+Look at the code and identify the lines responsible for running multiple MLflow experiments.
+
+In your answer, explain the role of:
+
+- the `CONFIGS` list;
+- the `for` loop;
+- the `train_one_run()` function;
+- `mlflow.start_run(run_name=run_name)`;
+- `mlflow.end_run()`;
+- `mlflow.log_params()`;
+- `mlflow.log_metrics()`;
+- `mlflow.sklearn.log_model()`;
+- `mlflow.log_artifacts()`.
+
+Then explain how MLflow separates the results of `run1.1`, `run2.1`, and `run3.1`.
+
+
+
+
+The multiple runs are defined in the `CONFIGS` list.
+The `for` loop reads each configuration and calls `train_one_run()`.
+Inside `train_one_run()`, `mlflow.start_run(run_name=run_name)` starts a new MLflow run with a specific name.
+Then MLflow logs the parameters, metrics, model, and artifacts for that run.
+Finally, `mlflow.end_run()` closes the current run before the next one starts.
+This allows MLflow to save `run1.1`, `run2.1`, and `run3.1` as separate experiments, so we can compare their results in the MLflow UI.
